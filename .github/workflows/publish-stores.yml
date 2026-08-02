@@ -1,0 +1,147 @@
+name: Publish browser stores
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Existing GitHub Release tag to publish
+        required: true
+        type: string
+      target:
+        description: Store to publish
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing GitHub Release tag to publish (for example, v1.2.3)
+        required: true
+        type: string
+      target:
+        description: Store to publish
+        required: true
+        type: choice
+        options:
+          - firefox
+          - chrome
+          - both
+
+permissions:
+  contents: read
+
+concurrency:
+  group: store-publish-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  firefox:
+    name: Submit Firefox package
+    if: inputs.target == 'firefox' || inputs.target == 'both'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: browser-stores
+    steps:
+      - name: Check out the released revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Enable the pinned package manager
+        run: corepack enable
+      - name: Install the pinned Mozilla publishing tool
+        run: pnpm install --frozen-lockfile
+      - name: Download and verify the released Firefox package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          VERSION="${RELEASE_TAG#v}"
+          mkdir release-artifacts
+          gh release download "$RELEASE_TAG" \
+            --pattern "humble-helper-$VERSION-firefox.zip" \
+            --pattern SHA256SUMS \
+            --dir release-artifacts
+          node scripts/release-artifacts.mjs verify "$RELEASE_TAG" release-artifacts firefox
+          mkdir release-artifacts/firefox-source
+          unzip -q "release-artifacts/humble-helper-$VERSION-firefox.zip" \
+            -d release-artifacts/firefox-source
+      - name: Submit to Mozilla Add-ons
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: >-
+          pnpm exec web-ext --no-config-discovery sign
+          --source-dir release-artifacts/firefox-source
+          --artifacts-dir release-artifacts/firefox-signed
+          --channel listed
+          --amo-metadata store/amo-metadata.json
+          --approval-timeout 0
+          --timeout 300000
+          --no-input
+
+  chrome:
+    name: Submit Chrome package
+    if: inputs.target == 'chrome' || inputs.target == 'both'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: browser-stores
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the released revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Download and verify the released Chrome package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          VERSION="${RELEASE_TAG#v}"
+          mkdir release-artifacts
+          gh release download "$RELEASE_TAG" \
+            --pattern "humble-helper-$VERSION-chrome.zip" \
+            --pattern SHA256SUMS \
+            --dir release-artifacts
+          node scripts/release-artifacts.mjs verify "$RELEASE_TAG" release-artifacts chrome
+      - name: Authenticate to Google without a stored service-account key
+        id: google-auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_lifetime: 600s
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+          create_credentials_file: false
+      - name: Upload and submit to the Chrome Web Store
+        shell: bash
+        env:
+          CHROME_ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
+          CHROME_PUBLISHER_ID: ${{ vars.CHROME_PUBLISHER_ID }}
+          CHROME_EXTENSION_ID: ${{ vars.CHROME_EXTENSION_ID }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          node scripts/publish-chrome.mjs "release-artifacts/humble-helper-$VERSION-chrome.zip"

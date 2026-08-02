@@ -1,0 +1,23 @@
+{
+  "name": "humble-helper",
+  "private": true,
+  "version": "0.2.0",
+  "packageManager": "pnpm@11.9.0",
+  "description": "Cross-browser Humble Bundle discovery, Steam overlap, and donation split helper.",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "audit": "pnpm audit --audit-level high",
+    "check": "node scripts/check-syntax.mjs",
+    "prepare:build": "node scripts/prepare-build.mjs",
+    "lint": "node scripts/prepare-build.mjs && web-ext lint --source-dir dist/firefox --warnings-as-errors",
+    "build:firefox": "node scripts/build-extensions.mjs firefox",
+    "build:chrome": "node scripts/build-extensions.mjs chrome",
+    "build": "node scripts/build-extensions.mjs",
+    "release:prepare": "node scripts/release-artifacts.mjs prepare",
+    "release:verify": "node scripts/release-artifacts.mjs verify",
+    "publish:chrome": "node scripts/publish-chrome.mjs"
+  },
+  "devDependencies": {
+    "web-ext": "10.5.0"
+  }
+}

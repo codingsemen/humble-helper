@@ -1,0 +1,36 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:17"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    labels:
+      - dependencies
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      development-dependencies:
+        dependency-type: development
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:27"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    labels:
+      - dependencies
+    commit-message:
+      prefix: chore(deps-actions)
+    groups:
+      github-actions:
+        patterns:
+          - "*"

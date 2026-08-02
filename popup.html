@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Humble Helper</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="popup">
+      <header class="topbar">
+        <div class="brand">
+          <img src="icons/icon.svg" alt="" width="28" height="28">
+          <div><strong>Humble Helper</strong><span>Bundle watch + Steam overlap</span></div>
+        </div>
+        <button id="settings-button" class="icon-button" type="button" aria-label="Open settings" title="Settings">⚙</button>
+      </header>
+
+      <section class="bundle-section" aria-labelledby="bundles-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Available now</p>
+            <h1 id="bundles-heading">Game bundles</h1>
+          </div>
+          <button id="bundle-refresh" class="quiet-button" type="button">Refresh</button>
+        </div>
+        <p id="bundle-status" class="section-status">Checking Humble…</p>
+        <div id="bundle-list" class="bundle-list" aria-live="polite">
+          <div class="bundle-placeholder"></div>
+          <div class="bundle-placeholder"></div>
+          <div class="bundle-placeholder"></div>
+        </div>
+        <button id="all-bundles-button" class="all-bundles" type="button">Browse all bundles on Humble ↗</button>
+      </section>
+
+      <section id="steam-card" class="steam-card" aria-labelledby="steam-heading">
+        <div class="steam-card__heading">
+          <div><span class="status-dot"></span><strong id="steam-heading">Steam snapshot</strong></div>
+          <button id="steam-refresh" class="quiet-button" type="button">Refresh</button>
+        </div>
+        <p id="steam-detail">Checking your cached account…</p>
+        <div class="metrics">
+          <span><b id="owned-count">—</b>owned</span>
+          <span><b id="wishlist-count">—</b>wishlisted</span>
+          <span><b id="cache-count">—</b>matched</span>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <button class="text-button" data-open="library" type="button">Steam library ↗</button>
+        <button class="text-button" data-open="wishlist" type="button">Wishlist ↗</button>
+        <button id="footer-settings" class="text-button footer__settings" type="button">Donation & display settings</button>
+      </footer>
+    </main>
+    <script src="shared.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

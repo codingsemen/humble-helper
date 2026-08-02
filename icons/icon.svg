@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title>Humble Helper</title>
+  <rect width="128" height="128" rx="24" fill="#202124"/>
+  <rect x="20" y="25" width="88" height="82" rx="10" fill="#2d3338" stroke="#d8dde1" stroke-width="4"/>
+  <path d="M20 46h88" fill="none" stroke="#7d8790" stroke-width="4"/>
+  <path d="M39 25v21M89 25v21" fill="none" stroke="#d8dde1" stroke-width="4" stroke-linecap="round"/>
+  <path d="M42 76l12 12 30-32" fill="none" stroke="#d8dde1" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M83 11l35 35-14 14-35-35z" fill="#4b535a"/>
+  <path d="M82 25l20 20" fill="none" stroke="#9da5ab" stroke-width="3" stroke-linecap="round"/>
+</svg>

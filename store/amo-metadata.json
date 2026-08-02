@@ -1,0 +1,11 @@
+{
+  "summary": {
+    "en-US": "Find current Humble Bundles, compare their contents with Steam, and manage a preferred donation split."
+  },
+  "categories": [
+    "other"
+  ],
+  "version": {
+    "license": "MIT"
+  }
+}

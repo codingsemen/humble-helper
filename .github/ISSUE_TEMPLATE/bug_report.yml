@@ -1,0 +1,36 @@
+name: Bug report
+description: Report incorrect behavior or a broken Humble/Steam match
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: dropdown
+    id: browser
+    attributes:
+      label: Browser
+      options:
+        - Firefox
+        - Chrome
+    validations:
+      required: true
+  - type: input
+    id: bundle
+    attributes:
+      label: Humble bundle URL
+      placeholder: https://www.humblebundle.com/games/...
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or console output
+      description: Remove account data, cookies, tokens, and private profile information.

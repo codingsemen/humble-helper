@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Humble Helper settings</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main class="settings-page">
+      <header class="page-header">
+        <img src="icons/icon.svg" alt="" width="42" height="42">
+        <div>
+          <p class="eyebrow">Humble Helper</p>
+          <h1>Settings</h1>
+        </div>
+      </header>
+
+      <section class="panel" aria-labelledby="donation-heading">
+        <div class="panel-heading">
+          <div>
+            <h2 id="donation-heading">Default donation split</h2>
+            <p>Applied when Humble's custom allocation controls become available.</p>
+          </div>
+          <label class="switch-label">
+            <input id="apply-split" type="checkbox">
+            <span>Apply automatically</span>
+          </label>
+        </div>
+
+        <div class="allocation-bar" aria-hidden="true">
+          <span id="developer-bar" class="allocation-bar__developer"></span>
+          <span id="charity-bar" class="allocation-bar__charity"></span>
+          <span id="humble-bar" class="allocation-bar__humble"></span>
+        </div>
+
+        <div class="allocation-grid">
+          <label>
+            <span><i class="key key--developer"></i>Developer / publisher</span>
+            <span class="number-input"><input id="developer-share" type="number" min="0" max="100" step="1" inputmode="decimal"><b>%</b></span>
+          </label>
+          <label>
+            <span><i class="key key--charity"></i>Charity</span>
+            <span class="number-input"><input id="charity-share" type="number" min="0" max="100" step="1" inputmode="decimal"><b>%</b></span>
+          </label>
+          <label>
+            <span><i class="key key--humble"></i>Extra for Humble</span>
+            <span class="number-input"><input id="humble-share" type="number" min="0" max="100" step="1" inputmode="decimal"><b>%</b></span>
+          </label>
+        </div>
+
+        <div class="total-row">
+          <span>Allocation total</span>
+          <strong id="allocation-total">100%</strong>
+        </div>
+        <p class="explanation">Humble enforces a minimum platform share for each bundle. “0% extra for Humble” keeps that required minimum and divides the remaining adjustable amount using your developer and charity percentages.</p>
+      </section>
+
+      <section class="panel" aria-labelledby="display-heading">
+        <div class="panel-heading">
+          <div>
+            <h2 id="display-heading">Bundle page</h2>
+            <p>Control how Steam matches appear while browsing Humble.</p>
+          </div>
+        </div>
+        <label class="check-row"><span><strong>Show wishlist marks</strong><small>Highlight games already on your Steam wishlist.</small></span><input id="wishlist-toggle" type="checkbox"></label>
+        <label class="check-row"><span><strong>Dim owned games</strong><small>Reduce the artwork contrast and add the owned ribbon.</small></span><input id="dim-toggle" type="checkbox"></label>
+      </section>
+
+      <div class="actions">
+        <button id="reset-button" class="secondary-button" type="button">Reset split to 50 / 50 / 0</button>
+        <button id="save-button" class="primary-button" type="button">Save settings</button>
+      </div>
+      <p id="save-status" class="save-status" role="status"></p>
+    </main>
+    <script src="shared.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>

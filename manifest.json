@@ -1,0 +1,84 @@
+{
+  "manifest_version": 3,
+  "name": "Humble Helper",
+  "version": "0.2.0",
+  "description": "Tracks current Humble game bundles, marks Steam ownership and wishlists, and applies a preferred donation split.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png",
+    "128": "icons/icon-128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "humble-steam-filter@example.com",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": ["websiteContent"]
+      }
+    },
+    "gecko_android": {
+      "strict_min_version": "142.0"
+    }
+  },
+  "permissions": [
+    "alarms",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*.humblebundle.com/*",
+    "https://store.steampowered.com/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; script-src 'self'; connect-src https://humblebundle.com https://*.humblebundle.com https://store.steampowered.com; img-src 'self' https://hb.imgix.net https://humblebundle-a.akamaihd.net; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+  },
+  "background": {
+    "scripts": [
+      "shared.js",
+      "background.js"
+    ]
+  },
+  "action": {
+    "default_title": "Humble Helper",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.humblebundle.com/games/*",
+        "https://*.humblebundle.com/books/*",
+        "https://*.humblebundle.com/software/*"
+      ],
+      "js": [
+        "shared.js",
+        "content/humble.js"
+      ],
+      "css": [
+        "content/humble.css"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://*.humblebundle.com/games/*",
+        "https://*.humblebundle.com/books/*",
+        "https://*.humblebundle.com/software/*"
+      ],
+      "js": [
+        "content/page-donation.js"
+      ],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    }
+  ]
+}
