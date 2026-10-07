@@ -102,10 +102,11 @@ test("AMO locale migration skips empty optional fields and fails before writes o
   const listing = JSON.parse(fs.readFileSync(path.join(root, "store", "firefox", "listing.json"), "utf8"));
   const { buildMetadataPayload, validateListing } = await import(moduleUrl);
   assert.deepEqual(buildMetadataPayload(listing, {
-    default_locale: "de", support_email: null, support_url: { url: {} }, developer_comments: { de: "" }
+    default_locale: "de", support_email: null, support_url: { url: {} }, developer_comments: { de: null }
   }), buildMetadataPayload(listing));
   for (const addon of [
     {},
+    { default_locale: "de", developer_comments: { de: "" } },
     { default_locale: "de", support_email: { fr: "contact@example.com" } },
     { default_locale: "de", support_email: "contact@example.com" },
     { default_locale: "de", support_email: { de: 12 } },

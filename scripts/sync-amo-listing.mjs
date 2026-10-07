@@ -217,7 +217,7 @@ export function buildMetadataPayload(listing, addon) {
       || (text !== null && typeof text !== "string"))) {
       throw new Error(`AMO ${field} must contain full locale maps, not localized or outgoing values`);
     }
-    if (!entries.some(([, text]) => typeof text === "string" && text.length > 0)
+    if (!entries.some(([, text]) => typeof text === "string")
       || translations[listing.default_locale]) continue;
     const fallback = translations[addon.default_locale];
     if (typeof fallback !== "string" || fallback.length === 0) {
