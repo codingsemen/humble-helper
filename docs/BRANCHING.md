@@ -1,6 +1,6 @@
 # Branching and change conventions
 
-Humble Helper uses a protected `main` branch and short-lived topic branches. Do not develop directly on `main` and do not keep long-running release branches.
+Humble Helper uses short-lived topic branches targeting `main`; configure branch protection as described in [publish.md](../publish.md). Do not develop directly on `main` and do not keep long-running release branches.
 
 ## Branch names
 
@@ -56,8 +56,8 @@ CI runs automatically for pull requests targeting `main`, for pushes to `main`, 
 
 Releases are made from `main` with immutable tags in the form `vMAJOR.MINOR.PATCH`. As a guide:
 
-- Increment `PATCH` for compatible fixes.
+- The pipeline increments `PATCH` automatically after successful main CI when Firefox publishing is enabled.
 - Increment `MINOR` for compatible features.
 - Increment `MAJOR` for breaking behavior or data changes.
 
-The version in `package.json` and `manifest.json` must match the tag. Tags from topic branches are rejected by the release job. See [publish.md](../publish.md) for the release and store-publishing procedure.
+Keep the versions in `package.json` and `manifest.json` aligned as the release-line base. Change both when deliberately introducing a new major/minor version. Automatic builds stamp the next patch into the packages and record it in a tag without committing generated version bumps to main. Manually created release tags must match the source versions exactly. Tags from topic branches are rejected by the manual release job. See [publish.md](../publish.md) for the release and store-publishing procedure.

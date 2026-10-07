@@ -2,7 +2,7 @@ packages:
   - .
 
 overrides:
-  # web-ext 10.5.0 pins older vulnerable releases through firefox-profile
-  # and fx-runner. Keep these overrides until upstream updates them.
-  adm-zip: 0.6.0
-  shell-quote: 1.9.0
+  # Keep web-ext's firefox-profile and fx-runner dependencies on patched
+  # releases until their upstream dependency constraints include these fixes.
+  adm-zip: 0.6.1
+  shell-quote: 1.12.0

@@ -256,6 +256,47 @@ test("returns Steam counts without exposing the library IDs to extension pages",
   assert.equal("settings" in status, false);
 });
 
+test("waits for an in-flight Steam sync before returning popup status", async () => {
+  let releaseLogin;
+  let markLoginStarted;
+  const loginStarted = new Promise((resolve) => { markLoginStarted = resolve; });
+  const loginGate = new Promise((resolve) => { releaseLogin = resolve; });
+  const harness = createBackgroundHarness({
+    fetch: async (url) => {
+      if (url.includes("/my/?")) {
+        markLoginStarted();
+        await loginGate;
+        return { ok: true, url, text: async () => "<html>g_steamID = '123'</html>" };
+      }
+      if (url.includes("/dynamicstore/userdata/")) {
+        return {
+          ok: true,
+          json: async () => ({ rgOwnedApps: [10, 20], rgWishlist: [30], rgFollowedApps: [] })
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }
+  });
+
+  const analysis = harness.sendFromContent({ type: "ANALYZE_BUNDLE", items: [] });
+  await loginStarted;
+
+  let statusResolved = false;
+  const status = harness.sendFromExtension({ type: "GET_STATUS" }).then((value) => {
+    statusResolved = true;
+    return value;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(statusResolved, false);
+
+  releaseLogin();
+  await analysis;
+  const result = await status;
+  assert.equal(result.ownedCount, 2);
+  assert.equal(result.wishlistCount, 1);
+  assert.equal(result.snapshot.isLoggedIn, true);
+});
+
 test("does not overwrite newer settings when title resolution finishes later", async () => {
   let releaseSearch;
   let markSearchStarted;

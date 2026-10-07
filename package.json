@@ -7,6 +7,7 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "audit": "pnpm audit --audit-level high",
+    "audit:release": "node scripts/run-release-audit.mjs",
     "check": "node scripts/check-syntax.mjs",
     "prepare:build": "node scripts/prepare-build.mjs",
     "lint": "node scripts/prepare-build.mjs && web-ext lint --source-dir dist/firefox --warnings-as-errors",
@@ -15,9 +16,10 @@
     "build": "node scripts/build-extensions.mjs",
     "release:prepare": "node scripts/release-artifacts.mjs prepare",
     "release:verify": "node scripts/release-artifacts.mjs verify",
-    "publish:chrome": "node scripts/publish-chrome.mjs"
+    "publish:chrome": "node scripts/publish-chrome.mjs",
+    "sync:amo": "node scripts/sync-amo-listing.mjs"
   },
   "devDependencies": {
-    "web-ext": "10.6.0"
+    "web-ext": "10.7.0"
   }
 }

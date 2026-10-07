@@ -36,12 +36,16 @@ test("keeps dependency audits scheduled and release handoff storage short-lived"
   const security = fs.readFileSync(path.join(root, ".github", "workflows", "security.yml"), "utf8");
   const release = fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8");
   assert.doesNotMatch(ci, /upload-artifact/);
-  assert.doesNotMatch(ci, /pnpm (?:run )?audit/);
+  assert.match(ci, /pnpm run audit:release/);
   assert.match(security, /cron: "17 4 \* \* 3"/);
   assert.match(security, /pnpm audit --audit-level high/);
   assert.match(release, /retention-days: 1/);
   assert.match(release, /--generate-notes/);
-  assert.match(release, /ENABLE_STORE_PUBLISHING == 'true'/);
+  assert.match(release, /ENABLE_FIREFOX_PUBLISHING == 'true'/);
+  assert.match(release, /ENABLE_CHROME_PUBLISHING == 'true'/);
+  assert.match(release, /target: firefox/);
+  assert.match(release, /target: chrome/);
+  assert.doesNotMatch(release, /ENABLE_STORE_PUBLISHING/);
 });
 
 test("uses gated short-lived Chrome credentials and no legacy OAuth secret", () => {
@@ -56,6 +60,18 @@ test("uses gated short-lived Chrome credentials and no legacy OAuth secret", () 
   assert.match(source, /create_credentials_file: false/);
   assert.doesNotMatch(source, /CHROME_(?:CLIENT_SECRET|REFRESH_TOKEN)/);
   assert.doesNotMatch(source, /credentials_json/);
+});
+
+test("keeps Firefox listing synchronization behind the AMO environment", () => {
+  const source = fs.readFileSync(
+    path.join(root, ".github", "workflows", "publish-stores.yml"),
+    "utf8"
+  );
+  assert.match(source, /firefox-listing:/);
+  assert.match(source, /needs: firefox/);
+  assert.match(source, /node scripts\/sync-amo-listing\.mjs --version/);
+  assert.match(source, /AMO_JWT_ISSUER: \$\{\{ secrets\.AMO_JWT_ISSUER \}\}/);
+  assert.match(source, /AMO_JWT_SECRET: \$\{\{ secrets\.AMO_JWT_SECRET \}\}/);
 });
 
 test("keeps package and extension versions aligned", () => {
@@ -78,10 +94,39 @@ test("uses a shell-free, repository-wide JavaScript syntax check", () => {
   assert.doesNotMatch(source, /shell:\s*true/);
 });
 
-test("locks the audited web-ext transitive security overrides", () => {
+test("locks the patched web-ext transitive security overrides", () => {
   const lockfile = fs.readFileSync(path.join(root, "pnpm-lock.yaml"), "utf8");
-  assert.match(lockfile, /adm-zip: 0\.6\.0/);
-  assert.match(lockfile, /shell-quote: 1\.9\.0/);
-  assert.doesNotMatch(lockfile, /^\s{2}adm-zip@0\.5\./m);
-  assert.doesNotMatch(lockfile, /^\s{2}shell-quote@1\.8\.4:/m);
+  assert.match(lockfile, /adm-zip: 0\.6\.1/);
+  assert.match(lockfile, /shell-quote: 1\.12\.0/);
+  assert.doesNotMatch(lockfile, /^\s{2}adm-zip@(?:0\.5\.\d+|0\.6\.0):/m);
+  assert.doesNotMatch(lockfile, /^\s{2}shell-quote@1\.(?:8|9|10)\.\d+:/m);
+});
+
+test("publishes only successful CI pushes to main from this repository", () => {
+  const source = fs.readFileSync(path.join(root, ".github", "workflows", "release-main.yml"), "utf8");
+  assert.match(source, /workflow_run:/);
+  assert.match(source, /workflows: \[CI\]/);
+  assert.match(source, /workflow_run\.conclusion == 'success'/);
+  assert.match(source, /workflow_run\.event == 'push'/);
+  assert.match(source, /workflow_run\.head_branch == 'main'/);
+  assert.match(source, /workflow_run\.head_repository\.full_name == github\.repository/);
+  assert.match(source, /ref: \$\{\{ github\.event\.workflow_run\.head_sha \}\}/);
+  assert.match(source, /pnpm run audit:release/);
+  assert.match(source, /HUMBLE_RELEASE_VERSION:/);
+  assert.match(source, /secrets: inherit/);
+  assert.match(source, /needs\.source\.outputs\.current == 'true'/);
+  assert.match(source, /CURRENT_MAIN=/);
+  assert.match(source, /needs: \[build, amo-preflight\]/);
+  assert.match(source, /--allow-existing "\$REUSED"/);
+  assert.match(source, /--verify-tag/);
+  assert.match(source, /\$OBJECT_SHA" != "\$SOURCE_SHA/);
+  assert.match(source, /needs\.github-release\.outputs\.published == 'true'/);
+  assert.doesNotMatch(source, /pull_request_target/);
+});
+
+test("serializes automatic and manual release versions without canceling pending store jobs", () => {
+  for (const file of ["release-main.yml", "release.yml", "publish-stores.yml"]) {
+    const source = fs.readFileSync(path.join(root, ".github", "workflows", file), "utf8");
+    assert.match(source, /concurrency:\s*\n\s*group: (?:extension-release|store-publish)\s*\n\s*cancel-in-progress: false\s*\n\s*queue: max/);
+  }
 });
