@@ -1,4 +1,7 @@
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
+const { mkdtemp, readFile, rm, writeFile } = require("node:fs/promises");
+const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const test = require("node:test");
@@ -53,7 +56,7 @@ test("immutable release validation uses the tagged source base rather than curre
   assert.throws(() => validateReleasedSourceMetadata("v0.2.1", { version: "0.2.0" }, { ...sourceManifest, browser_specific_settings: {} }), /Firefox extension ID/);
 });
 
-test("released ZIP manifests must match the immutable version, browser schema, and extension identity", async () => {
+test("extracted release manifests must match the immutable version, browser schema, and extension identity", async () => {
   const { validateReleasedManifest } = await import(moduleUrl);
   const sourceManifest = {
     version: "0.2.0", manifest_version: 3,
@@ -89,4 +92,24 @@ test("release verifier source-ref arguments bind old-asset validation to that ex
     ["verify", "v0.2.1", "release-artifacts", "firefox", "unexpected"]
   ]) assert.throws(() => parseReleaseArtifactArguments(arguments_));
   await assert.rejects(() => assertRepositoryVersionAtRef("v0.2.1", "main"), /exact release tag/);
+});
+
+test("release integrity verification checks hashes without a custom ZIP parser", async () => {
+  const { releaseArtifactNames, verifyRelease } = await import(moduleUrl);
+  const repositoryPackage = JSON.parse(await readFile(path.resolve(__dirname, "..", "package.json"), "utf8"));
+  const tag = `v${repositoryPackage.version}`;
+  const names = releaseArtifactNames(repositoryPackage.version);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "humble-release-checksums-"));
+  try {
+    const payload = Buffer.from("opaque package bytes; extraction is the publishing tool's responsibility");
+    const hash = createHash("sha256").update(payload).digest("hex");
+    await writeFile(path.join(directory, names.firefox), payload);
+    await writeFile(path.join(directory, "SHA256SUMS"),
+      `${hash}  ${names.chrome}\n${hash}  ${names.firefox}\n`);
+    await verifyRelease(tag, directory, "firefox");
+    await writeFile(path.join(directory, names.firefox), "tampered package");
+    await assert.rejects(() => verifyRelease(tag, directory, "firefox"), /Checksum mismatch/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

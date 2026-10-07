@@ -8,14 +8,14 @@ The repository contains six workflows:
 
 - `.github/workflows/ci.yml` tests the exact pull-request head revision, checks JavaScript syntax and dependencies, treats Firefox lint warnings as errors, and builds both browser packages. It runs for pull requests to `main`, pushes to `main`, and manual requests.
 - `.github/workflows/security.yml` audits the committed dependency lockfile for high-severity vulnerabilities every Wednesday at 04:17 UTC and on manual request.
-- `.github/workflows/release-main.yml` waits for successful push CI on `main`, compares the shipped browser contents with the last published release, and allocates/submits a new patch only when those contents or the deliberate source version changed. Listing changes are synchronized independently. Pull-request/manual CI cannot trigger deployment. Superseded main revisions are skipped.
+- `.github/workflows/release-main.yml` waits for successful push CI on `main`, checks release-relevant file changes since the last published tag, and allocates/submits a new patch only when those paths changed. It synchronizes the listing after a successful Firefox submission. Pull-request/manual CI cannot trigger deployment. Superseded main revisions are skipped.
 - `.github/workflows/release.yml` accepts only `vMAJOR.MINOR.PATCH` tags on `main`, repeats the release gates, creates distinct Firefox and Chrome ZIPs plus `SHA256SUMS`, and publishes generated GitHub release notes.
 - `.github/workflows/publish-stores.yml` downloads and verifies an existing GitHub Release and submits that version to Mozilla Add-ons or the Chrome Web Store. It can be called by the release workflow or run manually; it does not modify the Firefox listing.
 - `.github/workflows/sync-firefox-listing.yml` uses successful, current-main CI tooling to update the listing for an existing AMO version, without uploading extension code or allocating a version. It is independently runnable from `main`.
 
 Dependabot (not Renovate) checks npm and pinned GitHub Actions versions on Monday mornings. A check need not create a new PR when dependencies are already current or an update PR is open. Dependabot security updates are advisory-driven and require repository security settings in addition to `dependabot.yml`. Security update PRs are grouped separately from weekly version updates.
 
-CI and release gates use `pnpm run audit:release`, which rejects high/critical findings except for the narrowly scoped, expiring [node-forge exception](docs/SECURITY-EXCEPTIONS.md). The weekly raw audit intentionally has no exceptions, so this known finding remains visible until upstream fixes it. Audit failures do not modify the lockfile or repair vulnerabilities; the dependency update must be merged.
+CI, release gates, and the weekly security scan use `pnpm run audit:release`, which rejects high/critical findings except for the narrowly scoped, expiring [node-forge exception](docs/SECURITY-EXCEPTIONS.md). Accepted findings remain visible as GitHub warnings and in the job summary; they do not leave the weekly workflow permanently red. Unexpected high/critical findings, malformed reports, audit-tool failures, and expired exceptions still fail. `pnpm run audit` remains an unfiltered local check. Audit failures do not modify the lockfile or repair vulnerabilities; the dependency update must be merged.
 
 Store publishing is disabled by default. Automatic release publishing is controlled independently by two repository-level Actions variables:
 
@@ -100,14 +100,18 @@ Automatic patches are stamped into the packaged manifests; source versions stay 
 
 | Change | Result after successful main CI |
 | --- | --- |
-| Extension JavaScript, HTML, CSS, icons, or effective manifest/build output | New patch release and Firefox submission |
+| Shipped JavaScript, HTML, CSS, icons, manifest, or either packaging script | New patch release and Firefox submission |
 | Deliberate aligned version change in `package.json` and `manifest.json` | New release in the selected version line |
-| Firefox listing JSON, referenced store images, or listing-sync tooling | Update the existing AMO listing; no new extension version |
-| Pipeline, docs, tests, or publishing-tool dependency changes with identical browser contents | No extension release |
+| Firefox listing JSON, referenced store images, or listing-sync tooling | No extension release; run the independent listing-update workflow when ready |
+| Pipeline, docs, tests, or development-tool dependency changes | No extension release |
 
-The gate builds comparison ZIPs at the checked-in source version and compares their Firefox and Chrome contents against checksum-verified ZIPs from the highest stable published GitHub Release. Generated manifest version stamps, manifest JSON key ordering, and ZIP container metadata are ignored. It compares with the last release, not the preceding commit, so changes from earlier skipped merges are included. Dependency/build changes release only if they alter shipped contents, including changed packaging exclusions. A missing or corrupt release baseline blocks the job; only a repository with no canonical stable published releases takes the explicit initial-release path.
+The gate uses `git diff` from the highest canonical stable published release tag to the exact tested main revision. The allowlist follows `scripts/prepare-build.mjs`: `background.js`, `shared.js`, popup/options JavaScript, HTML and CSS, `content/`, `icons/`, and `manifest.json`, plus `scripts/prepare-build.mjs` and `scripts/build-extensions.mjs`. It includes added, changed, renamed, and deleted release inputs. There is no package download, comparison build, ZIP parser, or Actions-job-history scan before this decision. Checksums still verify packages when publishing.
 
-Listing changes are compared with the last successful listing-sync job on main, including when another job in that run failed. A later failed or cancelled sync forces repair on the next successful main merge even when its inputs did not change, because preview replacement may have partially changed remote state. Unrelated merges do not repeatedly delete/reupload unchanged screenshots. If no usable synchronization history is available, one conservative listing refresh establishes a new baseline. Every automatic/tagged extension submission also synchronizes its listing.
+Comparing with the last release rather than the preceding commit preserves unreleased changes from earlier skipped merges. Missing tags, non-main baselines, or release-list failures block rather than silently skipping a release. A repository with no stable published releases takes the initial-release path. This is deliberately a file-based rule: even a behavior-preserving edit to a shipped file or packaging script triggers a patch. `package.json` and the lockfile currently contain only development tooling and are not independent release inputs; an intentional aligned version bump changes `manifest.json` and therefore triggers a release. If runtime dependencies are added later, update the allowlist to include their dependency files.
+
+GitHub's native `paths` filters apply to whole push/PR workflows, not the `workflow_run` event or individual jobs. Keeping CI unfiltered and feeding the small Git check into `jobs.if` preserves the successful-CI gate without another third-party action. See [GitHub path filters](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onpushpull_requestpull_request_targetpathspaths-ignore).
+
+Listing-only updates are deliberate deployments: run **Synchronize Firefox listing** after their main CI passes, or rerun it after a failed update. Each automatic/tagged package submission also synchronizes its listing. Unrelated merges neither replace screenshots nor automatically repair previous failures; there is no incident-specific recovery logic in the pipeline.
 
 A successful main revision superseded by a newer merge is skipped, so late CI cannot overwrite newer code. A fresh release whose version is already occupied on AMO fails rather than silently treating a manual upload as its own submission. Stop standalone manual uploads after enabling automation; use the pipeline and its recorded tags for version reservation.
 
@@ -155,17 +159,17 @@ A published release is intentionally not mutated on rerun. If the release job fa
 
 Firefox packages must be signed by Mozilla. The workflow uses Mozilla's maintained `web-ext sign` flow with the `listed` channel, API credentials supplied only to the protected store job, and `--approval-timeout 0` so GitHub does not spend minutes waiting for review.
 
-The repository-managed AMO listing is [`store/firefox/listing.json`](store/firefox/listing.json). After a version submission succeeds, or when listing inputs change without a package release, a separate protected workflow updates the listing metadata, uploads the icon, replaces the AMO preview set with the committed screenshots, and applies optional version release notes. The current preview files are shared with the Chrome listing under `store/chrome/`; edit the committed files and captions in a pull request before publishing.
+The repository-managed AMO listing is [`store/firefox/listing.json`](store/firefox/listing.json). After a version submission succeeds, or on explicit manual request for a listing-only update, a separate protected workflow updates the listing metadata, uploads the icon, replaces the AMO preview set with the committed screenshots, and applies optional version release notes. The current preview files are shared with the Chrome listing under `store/chrome/`; edit the committed files and captions in a pull request before publishing.
 
-### Update or repair the existing listing without a release
+### Update the existing listing without a release
 
-1. Merge the listing/tooling fix into `main` and let that exact revision pass push CI.
-2. The automatic workflow synchronizes changed listing inputs without creating a new extension version. To retry explicitly, open **Actions -> Synchronize Firefox listing -> Run workflow**, select `main`, and leave `version` empty to target AMO's current public version (currently `0.2.1`), or enter an already-submitted listed version such as `0.2.1`.
+1. Merge the listing/tooling change into `main` and let that exact revision pass push CI.
+2. Open **Actions -> Synchronize Firefox listing -> Run workflow**, select `main`, and leave `version` empty to target AMO's current public version, or enter an already-submitted listed version.
 3. The workflow rejects stale or untested main revisions and nonexistent/rejected target versions before changing the listing. A listed version awaiting review can be targeted explicitly. Store operations share the publishing concurrency queue.
 
 This sync changes name, summary, description, homepage, configured support fields, categories, flags, icon, screenshots/captions, and optional release notes. It does not replace the extension package, bump its version, change account credentials, or manage AMO-only reviewer/policy settings. Screenshot replacement is not transactional: a later API failure can leave a partial preview set, so retry the listing workflow after fixing the cause.
 
-The original `0.2.1` failure was a metadata validation error: AMO's existing default locale was `de`, with support email and support URL only in German. Switching the default to `en-US` without supplying English fallback values made AMO reject the first metadata PATCH with HTTP 400. The package submission was successful; icon and screenshot updates had not started. The migration now preserves those contacts and translations.
+For local listing updates, use the same generic helper with `AMO_JWT_ISSUER` and `AMO_JWT_SECRET` already configured locally. Run `pnpm run sync:amo -- --dry-run` to validate repository assets, then `pnpm run sync:amo -- --version MAJOR.MINOR.PATCH` to update an existing listed version. The live command also replaces screenshots; use a targeted authenticated AMO metadata PATCH or the developer dashboard if only a contact field needs correction. Do not commit credentials. GitHub environment-secret values cannot be retrieved for local use.
 
 1. Create an AMO developer account and API credentials.
 2. Add these environment or repository secrets:
@@ -210,9 +214,9 @@ The Chrome job downloads the released ZIP, verifies its SHA-256 checksum, upload
 
 - Manual tag release rejected immediately: the tag must be `vMAJOR.MINOR.PATCH`, match both version files, and point to a commit contained in `main`. Automatic tags can have a newer patch than the source base, but must use the same major/minor.
 - Automatic main release skipped: ensure `ENABLE_FIREFOX_PUBLISHING` is a repository Actions **Variable** set to `true`, the triggering CI was a successful push to `main`, and its source is still the current main revision.
-- Package jobs skipped with `packaged-content-unchanged`: expected for pipeline, documentation, test, and listing-only changes; successful CI is still required.
+- Package jobs skipped with `needs_release=false`: expected when no release-relevant paths changed; successful CI is still required.
 - Listing-only repair: run **Synchronize Firefox listing** on current, CI-tested `main`; do not create a new extension version to repair metadata.
-- Security findings repeat: merge the dependency fix; rerunning the same committed lockfile will report the same findings. The approved node-forge finding remains visible in weekly scans. Enable Dependabot alerts and security updates in repository settings to get advisory-driven fix PRs.
+- Security findings repeat: merge the dependency fix; rerunning the same committed lockfile will report the same findings. The approved node-forge finding remains a visible warning in weekly scans until patched or its exception expires. New unaccepted high/critical findings and expiry fail the scan. Enable Dependabot alerts and security updates in repository settings to get advisory-driven fix PRs.
 - Required CI check is missing: run one pull request after adding the workflow, then select `CI / Branch checks` in the ruleset.
 - Firefox submission asks for metadata: verify `store/firefox/listing.json`, the generated submission metadata step, and the AMO listing state.
 - Chrome OIDC authentication fails: verify the provider resource name, service-account email, `roles/iam.workloadIdentityUser` binding, repository condition, and environment name.

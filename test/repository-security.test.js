@@ -38,7 +38,8 @@ test("keeps dependency audits scheduled and release handoff storage short-lived"
   assert.doesNotMatch(ci, /upload-artifact/);
   assert.match(ci, /pnpm run audit:release/);
   assert.match(security, /cron: "17 4 \* \* 3"/);
-  assert.match(security, /pnpm audit --audit-level high/);
+  assert.match(security, /pnpm run audit:release/);
+  assert.doesNotMatch(security, /continue-on-error/);
   assert.match(release, /retention-days: 1/);
   assert.match(release, /--generate-notes/);
   assert.match(release, /ENABLE_FIREFOX_PUBLISHING == 'true'/);
@@ -78,30 +79,24 @@ test("keeps Firefox listing synchronization behind the AMO environment", () => {
   assert.match(source, /AMO_JWT_SECRET: \$\{\{ secrets\.AMO_JWT_SECRET \}\}/);
 });
 
-test("allocates patch versions only after comparing immutable shipped content", () => {
+test("allocates patch versions only after a lightweight release-path check", () => {
   const source = fs.readFileSync(path.join(root, ".github", "workflows", "release-main.yml"), "utf8");
   const changes = source.slice(source.indexOf("  changes:"), source.indexOf("  build:"));
   const build = source.slice(source.indexOf("  build:"), source.indexOf("  amo-preflight:"));
-  assert.match(changes, /node scripts\/release-context\.mjs/);
-  assert.match(changes, /pnpm install --frozen-lockfile/);
-  assert.match(changes, /pnpm run build/);
-  assert.match(changes, /gh release download/);
-  assert.match(changes, /--pattern SHA256SUMS/);
   assert.match(changes, /node scripts\/release-changes\.mjs/);
-  assert.match(changes, /--current-artifacts artifacts/);
-  assert.match(changes, /--source-ref "\$BASELINE_SHA"/);
-  assert.doesNotMatch(changes, /HUMBLE_RELEASE_VERSION|release-version\.mjs next|secrets\./);
+  assert.match(changes, /SOURCE_SHA: \$\{\{ github\.event\.workflow_run\.head_sha \}\}/);
+  assert.doesNotMatch(changes, /pnpm|release-context|release download|current-artifacts|HUMBLE_RELEASE_VERSION|release-version\.mjs next|secrets\./);
   assert.match(build, /needs: changes/);
   assert.match(build, /if: needs\.changes\.outputs\.needs_release == 'true'/);
   assert.match(build, /node scripts\/release-version\.mjs next/);
   const listing = source.slice(source.indexOf("  synchronize-listing:"));
-  assert.match(listing, /always\(\)/);
-  assert.match(listing, /needs\.changes\.result == 'success'/);
-  assert.match(listing, /needs_release == 'false'/);
-  assert.match(listing, /listing_changed == 'true'/);
+  assert.match(listing, /needs: \[build, publish-firefox\]/);
   assert.match(listing, /needs\.publish-firefox\.result == 'success'/);
   assert.match(listing, /uses: \.\/\.github\/workflows\/sync-firefox-listing\.yml/);
   assert.match(listing, /actions: read/);
+  assert.doesNotMatch(source, /listing_changed|listing_baseline|filter=all|force.*repair/);
+  assert.equal(fs.existsSync(path.join(root, "scripts", "release-context.mjs")), false);
+  assert.equal(fs.existsSync(path.join(root, "test", "release-context.test.js")), false);
 });
 
 test("publishing retries use tested main tools without bundling listing mutations", () => {

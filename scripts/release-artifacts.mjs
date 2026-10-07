@@ -129,15 +129,15 @@ export async function assertRepositoryVersionAtRef(tag, sourceRef = tag) {
 export function validateReleasedManifest({ tag, browser, manifest, sourceManifest }) {
   const version = releaseVersionFromTag(tag);
   if (!browsers.includes(browser) || !manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
-    throw new Error("Release ZIP must contain a browser manifest object");
+    throw new Error("Released package must contain a browser manifest object");
   }
   if (manifest.version !== version || manifest.manifest_version !== sourceManifest?.manifest_version) {
-    throw new Error(`Release ZIP manifest must match ${tag} and its released manifest schema`);
+    throw new Error(`Released manifest must match ${tag} and its released manifest schema`);
   }
   const actualGuid = manifest.browser_specific_settings?.gecko?.id;
   const expectedGuid = sourceManifest?.browser_specific_settings?.gecko?.id;
   if (!expectedGuid || (browser === "firefox" ? actualGuid !== expectedGuid : actualGuid !== undefined)) {
-    throw new Error("Release ZIP has an unexpected Firefox extension ID");
+    throw new Error("Released manifest has an unexpected Firefox extension ID");
   }
 }
 
@@ -192,9 +192,9 @@ async function prepareRelease(tag) {
 
 export async function verifyRelease(tag, directoryArgument, target, sourceRef) {
   const version = releaseVersionFromTag(tag);
-  const source = sourceRef
-    ? await assertRepositoryVersionAtRef(tag, sourceRef)
-    : await assertRepositoryVersion(version);
+  await (sourceRef
+    ? assertRepositoryVersionAtRef(tag, sourceRef)
+    : assertRepositoryVersion(version));
   if (target && !browsers.includes(target)) {
     throw new Error("Verification target must be chrome or firefox");
   }
@@ -220,16 +220,6 @@ export async function verifyRelease(tag, directoryArgument, target, sourceRef) {
     if (actual !== checksums.get(names[browser])) {
       throw new Error(`Checksum mismatch for ${names[browser]}`);
     }
-    // Dynamic import avoids a static cycle: release-changes also consumes the
-    // shared tag/checksum helpers from this module.
-    const { readReleaseZip } = await import("./release-changes.mjs");
-    const files = readReleaseZip(await readFile(file));
-    if (!files.has("manifest.json")) throw new Error("Release ZIP is missing manifest.json");
-    validateReleasedManifest({
-      tag, browser,
-      manifest: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(files.get("manifest.json"))),
-      sourceManifest: source.manifest
-    });
   }
   process.stdout.write(`Verified ${targets.join(" and ")} release artifacts for ${tag}.\n`);
 }

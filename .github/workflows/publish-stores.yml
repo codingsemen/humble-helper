@@ -135,6 +135,18 @@ jobs:
           mkdir release-artifacts/firefox-source
           unzip -q "release-artifacts/humble-helper-$VERSION-firefox.zip" \
             -d release-artifacts/firefox-source
+          node --input-type=module <<'NODE'
+          import { readFile } from 'node:fs/promises';
+          import { assertRepositoryVersionAtRef, validateReleasedManifest } from './scripts/release-artifacts.mjs';
+          const tag = process.env.RELEASE_TAG;
+          const { manifest: sourceManifest } = await assertRepositoryVersionAtRef(tag);
+          const currentManifest = JSON.parse(await readFile('manifest.json', 'utf8'));
+          if (currentManifest.browser_specific_settings?.gecko?.id !== sourceManifest.browser_specific_settings?.gecko?.id) {
+            throw new Error('Released extension ID differs from the current AMO publishing target.');
+          }
+          const manifest = JSON.parse(await readFile('release-artifacts/firefox-source/manifest.json', 'utf8'));
+          validateReleasedManifest({ tag, browser: 'firefox', manifest, sourceManifest });
+          NODE
       - name: Check whether Mozilla already received this version
         id: submission
         env:
