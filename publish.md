@@ -4,16 +4,24 @@ This guide describes the repository automation, one-time GitHub and browser-stor
 
 ## Automation overview
 
-The repository contains four workflows:
+The repository contains five workflows:
 
-- `.github/workflows/ci.yml` tests the exact pull-request head revision, checks JavaScript syntax, treats Firefox lint warnings as errors, and builds both browser packages. It runs for pull requests to `main`, pushes to `main`, and manual requests.
+- `.github/workflows/ci.yml` tests the exact pull-request head revision, checks JavaScript syntax and dependencies, treats Firefox lint warnings as errors, and builds both browser packages. It runs for pull requests to `main`, pushes to `main`, and manual requests.
 - `.github/workflows/security.yml` audits the committed dependency lockfile for high-severity vulnerabilities every Wednesday at 04:17 UTC and on manual request.
+- `.github/workflows/release-main.yml` waits for successful push CI on `main`, allocates the next patch version, creates a GitHub Release, and submits it to Firefox. Pull-request/manual CI cannot trigger deployment. Superseded main revisions are skipped.
 - `.github/workflows/release.yml` accepts only `vMAJOR.MINOR.PATCH` tags on `main`, repeats the release gates, creates distinct Firefox and Chrome ZIPs plus `SHA256SUMS`, and publishes generated GitHub release notes.
-- `.github/workflows/publish-stores.yml` downloads and verifies an existing GitHub Release, then submits that version to Mozilla Add-ons, the Chrome Web Store, or both. It can be called by the release workflow or run manually.
+- `.github/workflows/publish-stores.yml` downloads and verifies an existing GitHub Release, submits that version to Mozilla Add-ons or the Chrome Web Store, and synchronizes the repository-managed Firefox listing metadata and previews. It can be called by the release workflow or run manually.
 
-Dependabot checks npm and pinned GitHub Actions versions on Monday mornings. Dependabot security updates are advisory-driven; the weekly schedule controls ordinary version updates and complements the weekly lockfile audit.
+Dependabot (not Renovate) checks npm and pinned GitHub Actions versions on Monday mornings. A check need not create a new PR when dependencies are already current or an update PR is open. Dependabot security updates are advisory-driven and require repository security settings in addition to `dependabot.yml`. Security update PRs are grouped separately from weekly version updates.
 
-Store publishing is disabled by default. The release workflow calls the store workflow only when the repository variable `ENABLE_STORE_PUBLISHING` is exactly `true`.
+CI and release gates use `pnpm run audit:release`, which rejects high/critical findings except for the narrowly scoped, expiring [node-forge exception](docs/SECURITY-EXCEPTIONS.md). The weekly raw audit intentionally has no exceptions, so this known finding remains visible until upstream fixes it. Audit failures do not modify the lockfile or repair vulnerabilities; the dependency update must be merged.
+
+Store publishing is disabled by default. Automatic release publishing is controlled independently by two repository-level Actions variables:
+
+- `ENABLE_FIREFOX_PUBLISHING=true` enables successful-main automatic patch releases and Firefox submissions, as well as submission of manually tagged releases.
+- `ENABLE_CHROME_PUBLISHING=true` submits the release to the Chrome Web Store.
+
+These are Actions **Variables**, not Secrets. Leave either variable unset (or set it to `false`) to skip that store. Main-merge automation submits only Firefox; Chrome remains an explicit manual/tag-release option. The manual **Publish browser stores** workflow does not depend on these flags.
 
 ## Required GitHub repository settings
 
@@ -40,7 +48,7 @@ Create a branch ruleset for `main` with these settings:
 - Require a linear history; use squash merges.
 - Block force pushes and deletion, including for administrators where practical.
 
-Create a tag ruleset for `v*` that blocks updates and deletion and limits tag creation to the maintainer. A protected tag is important because a workflow definition is loaded from the tagged commit itself.
+Create a tag ruleset for `v*` that blocks updates and deletion. If tag creation is restricted, allow the release workflow's GitHub Actions identity as well as the maintainer; otherwise automatic version reservation will fail. A protected tag is important because a workflow definition is loaded from the tagged commit itself.
 
 Create the release-note labels referenced by `.github/release.yml` if they are not already present: `breaking-change`, `security`, `feature`, `fix`, `dependencies`, `documentation`, and `skip-changelog`. The standard `bug` and `enhancement` labels are also recognized.
 
@@ -54,11 +62,12 @@ Under **Settings -> Security -> Advanced Security**, enable the dependency graph
 
 Create an environment named `browser-stores`:
 
-- For a public repository, require a reviewer and allow deployments from `v*` tags. Also allow `main` only if the manual store workflow will be launched from `main`.
+- Allow deployments from `main` (the automatic caller runs there) and `v*` tags (manual tagged releases).
+- For hands-off publishing after CI, do not require an environment reviewer. Add a reviewer only if you intentionally want a final approval click before each store submission.
 - If this is a solo repository, do not enable "prevent self-review" unless another reviewer is configured.
-- Store the Mozilla secrets and Chrome variables below in the environment when possible.
+- Store the Mozilla secrets and Chrome variables below in this environment when possible. Keep the two enable flags above as repository-level **Variables**; the release caller job cannot read environment-scoped variables before it selects which store workflow to invoke.
 
-On GitHub Free, environment reviewers, environment secrets, and deployment branch/tag restrictions are available for public repositories but not private repositories. For a private Free repository, keep `ENABLE_STORE_PUBLISHING` unset and run the store workflow manually using repository-level secrets and variables; that retains a deliberate click-to-publish gate.
+On GitHub Free, environment reviewers, environment secrets, and deployment branch/tag restrictions are available for public repositories but not private repositories. For a private Free repository, keep the automatic publishing flags unset and run the store workflow manually using repository-level secrets and variables; that retains a deliberate click-to-publish gate.
 
 ## GitHub Actions cost and safeguards
 
@@ -71,13 +80,28 @@ If the account has no valid payment method, GitHub blocks additional Actions usa
 3. Review Actions usage periodically, especially if the repository is private.
 4. Do not enable larger runners for this repository.
 
-The committed workflows also conserve usage: they use Linux standard runners, cancel superseded CI runs, apply 10- or 15-minute timeouts, create no pull-request artifacts, disable dependency caches, run the CVE audit weekly, retain the release handoff artifact for one day, and do not wait on a runner for store review.
+The committed workflows also conserve usage: they use Linux standard runners, cancel superseded CI runs, apply bounded timeouts, create no pull-request artifacts, disable dependency caches, retain release handoff artifacts for one day, and do not wait on a runner for store review. Dependency audits run in CI/releases and weekly. Release and store jobs serialize with `queue: max` so pending submissions are not replaced ([GitHub concurrency documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)).
 
 GitHub automatically disables scheduled workflows in a public repository after 60 days without repository activity. Re-enable the weekly security workflow from the Actions tab if that happens.
 
 Current limits and controls are documented by GitHub in [Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions), [budgets](https://docs.github.com/en/billing/how-tos/set-up-budgets), and [deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments).
 
-## Create a release
+## Automatic releases after merging to main
+
+1. Enable the repository Actions variable `ENABLE_FIREFOX_PUBLISHING=true` and configure the AMO secrets in `browser-stores`.
+2. Merge a tested PR. After the exact main revision passes **CI / Branch checks**, **Automatic Firefox release** builds and submits the next patch version.
+3. The allocator considers the checked-in base version, all release tags (including pending pipeline submissions), and AMO's public version. With base/public `0.2.0`, the first automatic release is `0.2.1`, then `0.2.2`.
+4. For new functionality, manually update both `package.json` and `manifest.json` to the desired major/minor base in the PR. For example, a `0.3.0` base starts automatic releases at `0.3.1`.
+
+Automatic patches are stamped into the packaged manifests; source versions stay aligned at the chosen base. There are no bot commits to main, no extra version-bump PRs, and no recursive pipeline triggers. The release tag records the exact tested source. GitHub's built-in token creates that tag without triggering the manual tag-release workflow; the automatic workflow calls store publishing directly.
+
+Re-running the latest main CI retries an already-tagged release without allocating another patch. A successful main revision superseded by a newer merge is skipped, so late CI cannot overwrite newer code. A fresh release whose version is already occupied on AMO fails rather than silently treating a manual upload as its own submission. Stop standalone manual uploads after enabling automation; use the pipeline and its recorded tags for version reservation.
+
+Mozilla may still review submissions before making them public. A successful submission is not a guarantee of immediate listing availability.
+
+## Optional manually tagged release
+
+Use automatic releases for normal merges. To deliberately publish a source-matching manual tag instead, disable `ENABLE_FIREFOX_PUBLISHING` before that merge so the automatic release does not compete with it, then use the manual store workflow. Do not add a lower source-base tag after the automatic workflow has already allocated its patch.
 
 1. Create a normal topic branch following [docs/BRANCHING.md](docs/BRANCHING.md).
 2. Update the same version in `package.json` and `manifest.json`.
@@ -88,7 +112,7 @@ Current limits and controls are documented by GitHub in [Actions billing](https:
    pnpm install --frozen-lockfile
    pnpm test
    pnpm run check
-   pnpm run audit
+   pnpm run audit:release
    pnpm run build
    ```
 
@@ -105,7 +129,9 @@ Current limits and controls are documented by GitHub in [Actions billing](https:
    Use an annotated tag (`git tag -a`) if commit/tag signing is not configured.
 
 6. Watch **Actions -> Release**. The workflow creates a draft first, attaches `humble-helper-VERSION-firefox.zip`, `humble-helper-VERSION-chrome.zip`, and `SHA256SUMS`, then publishes the release with notes generated from merged pull requests and labels.
-7. If automatic store publishing is enabled, approve the `browser-stores` deployment. Otherwise run **Actions -> Publish browser stores**, enter the existing release tag, and choose a target.
+7. If either store flag is enabled, the corresponding submission runs (with an approval click only if you configured an environment reviewer). To retry one store independently, run **Actions -> Publish browser stores**, enter the existing release tag, and choose `firefox` or `chrome`.
+
+If Firefox submission succeeds but the listing synchronization job fails, rerun the failed **Synchronize Firefox listing** job rather than submitting the same version again.
 
 A published release is intentionally not mutated on rerun. If the release job fails before publication, rerunning it safely completes the existing draft.
 
@@ -113,13 +139,23 @@ A published release is intentionally not mutated on rerun. If the release job fa
 
 Firefox packages must be signed by Mozilla. The workflow uses Mozilla's maintained `web-ext sign` flow with the `listed` channel, API credentials supplied only to the protected store job, and `--approval-timeout 0` so GitHub does not spend minutes waiting for review.
 
+The repository-managed AMO listing is [`store/firefox/listing.json`](store/firefox/listing.json). After the version submission succeeds, a separate protected job updates the listing metadata, uploads the icon, replaces the AMO preview set with the committed screenshots, and applies optional version release notes. The current preview files are shared with the Chrome listing under `store/chrome/`; edit the committed files and captions in a pull request before publishing.
+
 1. Create an AMO developer account and API credentials.
 2. Add these environment or repository secrets:
 
    - `AMO_JWT_ISSUER`
    - `AMO_JWT_SECRET`
 
-3. Review `store/amo-metadata.json`. It contains the minimum metadata needed for an initial listing. Complete the listing, privacy declarations, screenshots, support details, and reviewer information in AMO.
+3. Add the repository Actions variable `ENABLE_FIREFOX_PUBLISHING=true` when you want successful main merges and tagged releases to submit automatically. Leave it unset while you are still configuring AMO.
+
+4. Review `store/firefox/listing.json` for the repository-managed listing content. The workflow generates the small AMO submission metadata file from this source at release time. AMO-only policy or reviewer fields that are not represented in the file still require a one-time dashboard setup.
+
+5. Validate the repository-managed listing locally without contacting AMO:
+
+   ```bash
+   node scripts/sync-amo-listing.mjs --dry-run
+   ```
 
 The manifest already includes a stable Firefox extension ID, which is required for update submissions. See Mozilla's [web-ext signing reference](https://extensionworkshop.com/documentation/develop/web-ext-command-reference/) and [submission guide](https://extensionworkshop.com/documentation/publish/submitting-an-add-on/).
 
@@ -140,15 +176,17 @@ The workflow uses a Google service account and GitHub OIDC Workload Identity Fed
    - `CHROME_EXTENSION_ID` - the existing 32-character Chrome extension ID
 
 5. Follow Google's [service-account setup](https://developer.chrome.com/docs/webstore/service-accounts) and [Workload Identity Federation guidance](https://cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines). Test with the manual Chrome target first.
-6. Set `ENABLE_STORE_PUBLISHING=true` only after both stores work and the environment approval gate is configured.
+6. Set `ENABLE_CHROME_PUBLISHING=true` only after the Chrome listing has passed review, the API credentials work with the manual `chrome` target, and the environment approval gate is configured. Until then, leave it unset or `false`; Firefox can remain enabled independently.
 
 The Chrome job downloads the released ZIP, verifies its SHA-256 checksum, uploads it through API V2, waits only for asynchronous upload processing, rejects upload failures and validation warnings, and submits the item for review. Store review and eventual publication remain controlled by Google.
 
 ## Troubleshooting
 
-- Release rejected immediately: the tag must be `vMAJOR.MINOR.PATCH`, match both version files, and point to a commit contained in `main`.
+- Manual tag release rejected immediately: the tag must be `vMAJOR.MINOR.PATCH`, match both version files, and point to a commit contained in `main`. Automatic tags can have a newer patch than the source base, but must use the same major/minor.
+- Automatic main release skipped: ensure `ENABLE_FIREFOX_PUBLISHING` is a repository Actions **Variable** set to `true`, the triggering CI was a successful push to `main`, and its source is still the current main revision.
+- Security findings repeat: merge the dependency fix; rerunning the same committed lockfile will report the same findings. The approved node-forge finding remains visible in weekly scans. Enable Dependabot alerts and security updates in repository settings to get advisory-driven fix PRs.
 - Required CI check is missing: run one pull request after adding the workflow, then select `CI / Branch checks` in the ruleset.
-- Firefox submission asks for metadata: verify `store/amo-metadata.json` and the AMO listing state.
+- Firefox submission asks for metadata: verify `store/firefox/listing.json`, the generated submission metadata step, and the AMO listing state.
 - Chrome OIDC authentication fails: verify the provider resource name, service-account email, `roles/iam.workloadIdentityUser` binding, repository condition, and environment name.
 - Chrome upload fails: the version must be greater than the store version and the service account must be linked to the correct publisher.
 - Weekly audit stopped running: public-repository schedules are disabled after 60 days without activity; re-enable the workflow.

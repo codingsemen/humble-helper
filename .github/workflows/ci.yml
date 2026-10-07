@@ -42,5 +42,7 @@ jobs:
         run: pnpm test
       - name: Check JavaScript syntax
         run: pnpm run check
+      - name: Audit dependencies before accepting the branch
+        run: pnpm run audit:release
       - name: Lint and build both browser packages
         run: pnpm run build

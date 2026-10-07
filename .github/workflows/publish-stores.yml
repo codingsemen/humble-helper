@@ -11,6 +11,11 @@ on:
         description: Store to publish
         required: true
         type: string
+      allow_existing_firefox:
+        description: Permit retrying an already-reserved Firefox version
+        required: false
+        default: true
+        type: boolean
   workflow_dispatch:
     inputs:
       release_tag:
@@ -30,8 +35,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: store-publish-${{ inputs.release_tag }}
+  group: store-publish
   cancel-in-progress: false
+  queue: max
 
 jobs:
   firefox:
@@ -40,6 +46,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: browser-stores
+    permissions:
+      contents: read
     steps:
       - name: Check out the released revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,6 +73,7 @@ jobs:
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           VERSION="${RELEASE_TAG#v}"
+          export HUMBLE_RELEASE_VERSION="$VERSION"
           mkdir release-artifacts
           gh release download "$RELEASE_TAG" \
             --pattern "humble-helper-$VERSION-firefox.zip" \
@@ -74,19 +83,69 @@ jobs:
           mkdir release-artifacts/firefox-source
           unzip -q "release-artifacts/humble-helper-$VERSION-firefox.zip" \
             -d release-artifacts/firefox-source
-      - name: Submit to Mozilla Add-ons
+      - name: Check whether Mozilla already received this version
+        id: submission
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ALLOW_EXISTING: ${{ github.event_name == 'workflow_dispatch' || inputs.allow_existing_firefox }}
+        run: |
+          if [[ "$ALLOW_EXISTING" == "true" ]]; then
+            node scripts/check-amo-version.mjs "$RELEASE_TAG"
+          else
+            node scripts/check-amo-version.mjs "$RELEASE_TAG" --require-new
+          fi
+      - name: Generate submission metadata and submit to Mozilla Add-ons
+        if: steps.submission.outputs.exists != 'true'
         env:
           WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
           WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
-        run: >-
-          pnpm exec web-ext --no-config-discovery sign
-          --source-dir release-artifacts/firefox-source
-          --artifacts-dir release-artifacts/firefox-signed
-          --channel listed
-          --amo-metadata store/amo-metadata.json
-          --approval-timeout 0
-          --timeout 300000
-          --no-input
+        run: |
+          set -euo pipefail
+          node scripts/sync-amo-listing.mjs \
+            --write-submission-metadata release-artifacts/amo-metadata.json
+          pnpm exec web-ext --no-config-discovery sign \
+            --source-dir release-artifacts/firefox-source \
+            --artifacts-dir release-artifacts/firefox-signed \
+            --channel listed \
+            --amo-metadata release-artifacts/amo-metadata.json \
+            --approval-timeout 0 \
+            --timeout 300000 \
+            --no-input
+
+  firefox-listing:
+    name: Synchronize Firefox listing
+    if: inputs.target == 'firefox' || inputs.target == 'both'
+    needs: firefox
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: browser-stores
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the released revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Synchronize AMO metadata, icon, and previews
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          VERSION="${RELEASE_TAG#v}"
+          node scripts/sync-amo-listing.mjs --version "$VERSION"
 
   chrome:
     name: Submit Chrome package
@@ -118,6 +177,7 @@ jobs:
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           VERSION="${RELEASE_TAG#v}"
+          export HUMBLE_RELEASE_VERSION="$VERSION"
           mkdir release-artifacts
           gh release download "$RELEASE_TAG" \
             --pattern "humble-helper-$VERSION-chrome.zip" \
@@ -144,4 +204,5 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${RELEASE_TAG#v}"
+          export HUMBLE_RELEASE_VERSION="$VERSION"
           node scripts/publish-chrome.mjs "release-artifacts/humble-helper-$VERSION-chrome.zip"

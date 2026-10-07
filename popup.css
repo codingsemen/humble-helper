@@ -6,11 +6,12 @@
 }
 
 * { box-sizing: border-box; }
-body { width: 420px; min-height: 540px; max-height: 640px; margin: 0; background: #191b1f; }
+html, body { height: 100%; }
+body { width: 420px; height: 640px; margin: 0; overflow: hidden; background: #191b1f; }
 button { font: inherit; }
-.popup { padding: 16px; }
+.popup { display: flex; height: 100%; min-height: 0; padding: 16px; flex-direction: column; }
 
-.topbar { display: flex; align-items: center; justify-content: space-between; padding-bottom: 14px; border-bottom: 1px solid #33373d; }
+.topbar { display: flex; align-items: center; justify-content: space-between; padding-bottom: 14px; border-bottom: 1px solid #33373d; flex: 0 0 auto; }
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand img { border-radius: 7px; }
 .brand strong, .brand span { display: block; }
@@ -19,8 +20,9 @@ button { font: inherit; }
 .icon-button { width: 30px; height: 30px; padding: 0; color: #aab0b6; border: 1px solid #393e45; border-radius: 5px; background: transparent; cursor: pointer; }
 .icon-button:hover { color: #fff; border-color: #555c65; }
 
-.bundle-section { padding-top: 17px; }
+.bundle-section { display: flex; min-height: 0; padding-top: 17px; flex: 1 1 auto; flex-direction: column; }
 .section-heading, .steam-card__heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.section-heading, .section-status, .all-bundles { flex: 0 0 auto; }
 .eyebrow { margin: 0 0 3px; color: #7f878f; font-size: 9px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
 h1 { margin: 0; font-size: 18px; font-weight: 680; letter-spacing: -.02em; }
 .quiet-button { padding: 3px 0; color: #9ba2a9; border: 0; background: transparent; font-size: 10px; text-decoration: underline; cursor: pointer; }
@@ -28,7 +30,7 @@ h1 { margin: 0; font-size: 18px; font-weight: 680; letter-spacing: -.02em; }
 .quiet-button:disabled { opacity: .5; cursor: wait; }
 .section-status { min-height: 15px; margin: 7px 0 10px; color: #7d858d; font-size: 10px; }
 
-.bundle-list { max-height: 338px; overflow: auto; border-top: 1px solid #30343a; scrollbar-color: #484d54 transparent; scrollbar-width: thin; }
+.bundle-list { min-height: 0; overflow-x: hidden; overflow-y: auto; border-top: 1px solid #30343a; flex: 1 1 auto; scrollbar-color: #484d54 transparent; scrollbar-width: thin; overscroll-behavior: contain; }
 .bundle-card { position: relative; display: grid; grid-template-columns: 108px minmax(0, 1fr); gap: 12px; padding: 11px 0; color: inherit; border-bottom: 1px solid #30343a; text-decoration: none; }
 .bundle-card:hover .bundle-card__title { color: #fff; text-decoration: underline; }
 .bundle-card__image { width: 108px; height: 62px; overflow: hidden; border-radius: 4px; background: #292d33; }
@@ -44,7 +46,7 @@ h1 { margin: 0; font-size: 18px; font-weight: 680; letter-spacing: -.02em; }
 .all-bundles { width: 100%; padding: 10px 0 1px; color: #aeb4ba; border: 0; background: transparent; font-size: 10px; text-align: left; cursor: pointer; }
 .all-bundles:hover { color: #fff; }
 
-.steam-card { margin-top: 17px; padding: 13px; border: 1px solid #343940; border-radius: 6px; background: #1e2125; }
+.steam-card { margin-top: 17px; padding: 13px; border: 1px solid #343940; border-radius: 6px; background: #1e2125; flex: 0 0 auto; }
 .steam-card__heading > div { display: flex; align-items: center; gap: 7px; }
 .steam-card__heading strong { font-size: 11px; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #c1815e; }
@@ -55,7 +57,7 @@ h1 { margin: 0; font-size: 18px; font-weight: 680; letter-spacing: -.02em; }
 .metrics span:first-child { border-left: 0; }
 .metrics b { display: block; margin-bottom: 3px; color: #e5e8ea; font-size: 15px; line-height: 1; }
 
-.footer { display: flex; align-items: center; gap: 13px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #33373d; }
+.footer { display: flex; align-items: center; gap: 13px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #33373d; flex: 0 0 auto; }
 .text-button { padding: 0; color: #818890; border: 0; background: transparent; font-size: 9px; text-decoration: underline; cursor: pointer; }
 .text-button:hover { color: #fff; }
 .footer__settings { margin-left: auto; }

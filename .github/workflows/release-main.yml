@@ -1,0 +1,211 @@
+name: Automatic Firefox release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extension-release
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  source:
+    name: Select the successful current main revision
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      vars.ENABLE_FIREFOX_PUBLISHING == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      current: ${{ steps.source.outputs.current }}
+    steps:
+      - name: Check out the exact revision that passed CI
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the revision belongs to main
+        id: source
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
+          if [[ "$SOURCE_SHA" == "$(git rev-parse refs/remotes/origin/main)" ]]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping superseded CI revision; the newer main revision must pass its own CI."
+          fi
+
+  build:
+    name: Package the successful main revision
+    needs: source
+    if: needs.source.outputs.current == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      release_tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      reused: ${{ steps.version.outputs.reused }}
+    steps:
+      - name: Check out the exact revision that passed CI
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Enable the pinned package manager
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Allocate or reuse the next patch version
+        id: version
+        run: node scripts/release-version.mjs next
+      - name: Audit release dependencies
+        run: pnpm run audit:release
+      - name: Lint and build the versioned browser packages
+        env:
+          HUMBLE_RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: pnpm run build
+      - name: Prepare and verify the release packages
+        env:
+          HUMBLE_RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          pnpm run release:prepare -- "$RELEASE_TAG"
+          pnpm run release:verify -- "$RELEASE_TAG"
+      - name: Hand the packages to the release job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: main-release-${{ github.event.workflow_run.head_sha }}
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: true
+
+  amo-preflight:
+    name: Check AMO before reserving a new version
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: browser-stores
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the tested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Reject occupied versions unless retrying a reserved release
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          REUSED: ${{ needs.build.outputs.reused }}
+        run: node scripts/check-amo-version.mjs "$RELEASE_TAG" --allow-existing "$REUSED"
+
+  github-release:
+    name: Record the version and its tested source
+    needs: [build, amo-preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      published: ${{ steps.release.outputs.published }}
+    steps:
+      - name: Download the verified packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: main-release-${{ github.event.workflow_run.head_sha }}
+          path: release-artifacts
+      - name: Create or resume the immutable release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          CURRENT_MAIN="$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)"
+          if [[ "$SOURCE_SHA" != "$CURRENT_MAIN" ]]; then
+            echo "Skipping superseded source before publishing a release."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Reserve the version before creating a draft, even if publication
+          # fails later. Never attach different source to an existing tag.
+          if TAG_OBJECT="$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.type + " " + .object.sha' 2>/dev/null)"; then
+            read -r OBJECT_TYPE OBJECT_SHA <<< "$TAG_OBJECT"
+            for (( DEPTH=0; DEPTH < 10; DEPTH++ )); do
+              [[ "$OBJECT_TYPE" == "tag" ]] || break
+              TAG_OBJECT="$(gh api "repos/$GH_REPO/git/tags/$OBJECT_SHA" --jq '.object.type + " " + .object.sha')"
+              read -r OBJECT_TYPE OBJECT_SHA <<< "$TAG_OBJECT"
+            done
+            if [[ "$OBJECT_TYPE" != "commit" || "$OBJECT_SHA" != "$SOURCE_SHA" ]]; then
+              echo "Release tag $RELEASE_TAG does not point to the tested source; refusing reuse." >&2
+              exit 1
+            fi
+          else
+            gh api --method POST "repos/$GH_REPO/git/refs" \
+              -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$SOURCE_SHA" --silent
+          fi
+          if IS_DRAFT="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "$IS_DRAFT" == "true" ]]; then
+              gh release upload "$RELEASE_TAG" release-artifacts/* --clobber
+              gh release edit "$RELEASE_TAG" --draft=false --latest
+            else
+              echo "Reusing published release $RELEASE_TAG without replacing its assets."
+            fi
+          else
+            gh release create "$RELEASE_TAG" release-artifacts/* \
+              --target "$SOURCE_SHA" \
+              --verify-tag \
+              --draft \
+              --generate-notes \
+              --title "Humble Helper ${RELEASE_TAG#v}"
+            gh release edit "$RELEASE_TAG" --draft=false --latest
+          fi
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+  publish-firefox:
+    name: Submit the release to Firefox Add-ons
+    needs: [build, github-release]
+    if: needs.github-release.outputs.published == 'true'
+    permissions:
+      contents: read
+      # The shared workflow defines a conditional Chrome OIDC job. Its callers
+      # must allow that ceiling even though its Firefox jobs stay read-only.
+      id-token: write
+    uses: ./.github/workflows/publish-stores.yml
+    with:
+      release_tag: ${{ needs.build.outputs.release_tag }}
+      target: firefox
+      allow_existing_firefox: ${{ needs.build.outputs.reused == 'true' || github.run_attempt > 1 }}
+    secrets: inherit

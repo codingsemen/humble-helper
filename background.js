@@ -910,6 +910,14 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
   }
 
   async function getStatus() {
+    // The install/startup listener begins the initial Steam sync in the
+    // background. If the popup opens while that request is still in flight,
+    // reading storage immediately would briefly render the empty snapshot.
+    // Wait for the active sync so the first status response reflects the
+    // account data that is being fetched.
+    if (syncPromise) {
+      await syncPromise;
+    }
     var state = await readState();
     var cacheEntries = Object.values(pruneTitleCache(state.titleCache));
     return {

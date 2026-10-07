@@ -1,6 +1,7 @@
 import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { effectiveReleaseVersion } from "./release-version.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const requestTimeoutMilliseconds = 60_000;
@@ -66,6 +67,8 @@ async function publishChrome(packageArgument) {
   const publisherId = requiredEnvironmentValue("CHROME_PUBLISHER_ID", /^[A-Za-z0-9_-]{1,128}$/);
   const extensionId = requiredEnvironmentValue("CHROME_EXTENSION_ID", /^[a-p]{32}$/);
   const packageMetadata = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+  const manifest = JSON.parse(await readFile(path.join(root, "manifest.json"), "utf8"));
+  const version = effectiveReleaseVersion(packageMetadata.version, manifest.version);
   const itemName = `publishers/${publisherId}/items/${extensionId}`;
   const authorization = `Bearer ${accessToken}`;
 
@@ -97,9 +100,9 @@ async function publishChrome(packageArgument) {
   if (uploadState !== "SUCCEEDED") {
     throw new Error(`Chrome Web Store upload did not succeed (state: ${uploadState || "missing"})`);
   }
-  if (upload.crxVersion && upload.crxVersion !== packageMetadata.version) {
+  if (upload.crxVersion && upload.crxVersion !== version) {
     throw new Error(
-      `Chrome Web Store reported version ${upload.crxVersion}, expected ${packageMetadata.version}`
+      `Chrome Web Store reported version ${upload.crxVersion}, expected ${version}`
     );
   }
 
@@ -118,7 +121,7 @@ async function publishChrome(packageArgument) {
     throw new Error("Chrome Web Store publish response did not include a submission state");
   }
   process.stdout.write(
-    `Chrome Web Store accepted version ${packageMetadata.version}; submission state: ${submission.state}.\n`
+    `Chrome Web Store accepted version ${version}; submission state: ${submission.state}.\n`
   );
 }
 

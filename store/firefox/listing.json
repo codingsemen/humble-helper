@@ -1,0 +1,53 @@
+{
+  "guid": "humble-steam-filter@example.com",
+  "default_locale": "en-US",
+  "license": "MIT",
+  "metadata": {
+    "name": {
+      "en-US": "Humble Helper - Bundle & Steam Companion"
+    },
+    "summary": {
+      "en-US": "Find active Humble game bundles, spot Steam matches, and set your preferred donation split automatically."
+    },
+    "description": {
+      "en-US": "Humble Helper makes Humble Bundle browsing more useful for Steam players.\n\nDiscover active Humble game bundles from the extension popup, then open a bundle and see which Steam games you already own or have wishlisted. Owned games are dimmed and labelled so you can scan a bundle quickly without losing the original page layout.\n\nYou can also choose a default donation split. When Humble exposes its custom allocation controls, Humble Helper applies your saved developer, charity, and Humble allocation while respecting Humble's required minimum platform share.\n\nFeatures:\n\n- Browse current Humble game bundles from the extension popup.\n- Compare bundle items with your Steam library and wishlist.\n- See owned and wishlist marks directly on Humble bundle pages.\n- Dim owned games to make new-to-you items easier to find.\n- Configure and automatically apply a preferred donation split.\n- Works on Humble's games, books, and software pages, including localized Humble subdomains.\n\nPrivacy first: Steam account data stays in the extension's local browser storage. Steam credentials are sent only to Steam account endpoints; public title searches do not include login cookies. Humble Helper has no analytics, advertising, remote code, or private server."
+    },
+    "homepage": {
+      "en-US": "https://github.com/codingsemen/humble-helper"
+    },
+    "categories": {
+      "firefox": ["other"],
+      "android": ["other"]
+    },
+    "requires_payment": false,
+    "is_experimental": false
+  },
+  "icon": "store/chrome/icon-128.png",
+  "replace_existing_previews": true,
+  "previews": [
+    {
+      "path": "store/chrome/screenshots/01-bundle-discovery.png",
+      "caption": {
+        "en-US": "Find current Humble game bundles and see the Steam snapshot from the popup."
+      }
+    },
+    {
+      "path": "store/chrome/screenshots/02-owned-items.png",
+      "caption": {
+        "en-US": "Games already owned on Steam are dimmed and labelled directly on the bundle page."
+      }
+    },
+    {
+      "path": "store/chrome/screenshots/03-donation-settings.png",
+      "caption": {
+        "en-US": "Choose a developer, charity, and Humble split with a live 100% total indicator."
+      }
+    },
+    {
+      "path": "store/chrome/screenshots/04-donation-allocation.png",
+      "caption": {
+        "en-US": "Humble Helper applies the saved split when Humble's checkout allocation controls appear."
+      }
+    }
+  ]
+}

@@ -11,34 +11,27 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertReleaseVersion, effectiveReleaseVersion } from "./release-version.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultReleaseDirectory = path.join(root, "release-artifacts");
 const browsers = ["chrome", "firefox"];
 const maximumArtifactBytes = 50 * 1024 * 1024;
 
-function assertChromeCompatibleVersion(version) {
-  const components = version.split(".").map(Number);
-  if (components.some((component) => component > 65_535) || components.every((component) => component === 0)) {
-    throw new Error("Release version components must satisfy Chrome's 0-65535 manifest limits");
-  }
-}
-
 export function releaseVersionFromTag(tag) {
   const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag || "");
-  if (!match) {
+  if (!match || match[0] !== tag) {
     throw new Error("Release tags must use the form vMAJOR.MINOR.PATCH without leading zeroes");
   }
   const version = match.slice(1).join(".");
-  assertChromeCompatibleVersion(version);
-  return version;
+  return assertReleaseVersion(version);
 }
 
 export function releaseArtifactNames(version) {
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version || "")) {
     throw new Error("Invalid release version");
   }
-  assertChromeCompatibleVersion(version);
+  assertReleaseVersion(version);
   return Object.fromEntries(browsers.map((browser) => [
     browser,
     `humble-helper-${version}-${browser}.zip`
@@ -93,9 +86,10 @@ async function assertRepositoryVersion(version) {
     readFile(path.join(root, "package.json"), "utf8").then(JSON.parse),
     readFile(path.join(root, "manifest.json"), "utf8").then(JSON.parse)
   ]);
-  if (packageMetadata.version !== version || manifest.version !== version) {
+  const effectiveVersion = effectiveReleaseVersion(packageMetadata.version, manifest.version);
+  if (effectiveVersion !== version) {
     throw new Error(
-      `Tag version ${version} must match package.json and manifest.json (${packageMetadata.version}, ${manifest.version})`
+      `Tag version ${version} must match the effective build version ${effectiveVersion}`
     );
   }
 }

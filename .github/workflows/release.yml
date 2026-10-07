@@ -8,8 +8,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: extension-release
   cancel-in-progress: false
+  queue: max
 
 jobs:
   build:
@@ -43,7 +44,7 @@ jobs:
       - name: Check JavaScript syntax
         run: pnpm run check
       - name: Audit release dependencies
-        run: pnpm audit --audit-level high
+        run: pnpm run audit:release
       - name: Lint and build both browser packages
         run: pnpm run build
       - name: Prepare named release packages and checksums
@@ -56,6 +57,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
+          overwrite: true
 
   github-release:
     name: Publish GitHub release
@@ -74,6 +76,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
@@ -93,15 +96,28 @@ jobs:
           fi
           gh release edit "$RELEASE_TAG" --draft=false --latest
 
-  publish-stores:
-    name: Publish browser stores
+  publish-firefox:
+    name: Publish Firefox store
     needs: github-release
-    if: vars.ENABLE_STORE_PUBLISHING == 'true'
+    if: vars.ENABLE_FIREFOX_PUBLISHING == 'true'
     permissions:
       contents: read
       id-token: write
     uses: ./.github/workflows/publish-stores.yml
     with:
       release_tag: ${{ github.ref_name }}
-      target: both
+      target: firefox
+    secrets: inherit
+
+  publish-chrome:
+    name: Publish Chrome store
+    needs: github-release
+    if: vars.ENABLE_CHROME_PUBLISHING == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish-stores.yml
+    with:
+      release_tag: ${{ github.ref_name }}
+      target: chrome
     secrets: inherit
