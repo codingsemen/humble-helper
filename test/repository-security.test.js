@@ -64,14 +64,52 @@ test("uses gated short-lived Chrome credentials and no legacy OAuth secret", () 
 
 test("keeps Firefox listing synchronization behind the AMO environment", () => {
   const source = fs.readFileSync(
-    path.join(root, ".github", "workflows", "publish-stores.yml"),
+    path.join(root, ".github", "workflows", "sync-firefox-listing.yml"),
     "utf8"
   );
-  assert.match(source, /firefox-listing:/);
-  assert.match(source, /needs: firefox/);
-  assert.match(source, /node scripts\/sync-amo-listing\.mjs --version/);
+  assert.match(source, /workflow_dispatch:/);
+  assert.match(source, /environment: browser-stores/);
+  assert.match(source, /needs: source/);
+  assert.match(source, /node scripts\/run-amo-listing-sync\.mjs/);
+  assert.match(source, /actions\/workflows\/ci\.yml\/runs/);
+  assert.match(source, /SOURCE_SHA.*CURRENT_MAIN/);
+  assert.doesNotMatch(source, /web-ext.*sign|release create|release-version\.mjs next/);
   assert.match(source, /AMO_JWT_ISSUER: \$\{\{ secrets\.AMO_JWT_ISSUER \}\}/);
   assert.match(source, /AMO_JWT_SECRET: \$\{\{ secrets\.AMO_JWT_SECRET \}\}/);
+});
+
+test("allocates patch versions only after comparing immutable shipped content", () => {
+  const source = fs.readFileSync(path.join(root, ".github", "workflows", "release-main.yml"), "utf8");
+  const changes = source.slice(source.indexOf("  changes:"), source.indexOf("  build:"));
+  const build = source.slice(source.indexOf("  build:"), source.indexOf("  amo-preflight:"));
+  assert.match(changes, /node scripts\/release-context\.mjs/);
+  assert.match(changes, /pnpm install --frozen-lockfile/);
+  assert.match(changes, /pnpm run build/);
+  assert.match(changes, /gh release download/);
+  assert.match(changes, /--pattern SHA256SUMS/);
+  assert.match(changes, /node scripts\/release-changes\.mjs/);
+  assert.match(changes, /--current-artifacts artifacts/);
+  assert.match(changes, /--source-ref "\$BASELINE_SHA"/);
+  assert.doesNotMatch(changes, /HUMBLE_RELEASE_VERSION|release-version\.mjs next|secrets\./);
+  assert.match(build, /needs: changes/);
+  assert.match(build, /if: needs\.changes\.outputs\.needs_release == 'true'/);
+  assert.match(build, /node scripts\/release-version\.mjs next/);
+  const listing = source.slice(source.indexOf("  synchronize-listing:"));
+  assert.match(listing, /always\(\)/);
+  assert.match(listing, /needs\.changes\.result == 'success'/);
+  assert.match(listing, /needs_release == 'false'/);
+  assert.match(listing, /listing_changed == 'true'/);
+  assert.match(listing, /needs\.publish-firefox\.result == 'success'/);
+  assert.match(listing, /uses: \.\/\.github\/workflows\/sync-firefox-listing\.yml/);
+  assert.match(listing, /actions: read/);
+});
+
+test("publishing retries use tested main tools without bundling listing mutations", () => {
+  const publisher = fs.readFileSync(path.join(root, ".github", "workflows", "publish-stores.yml"), "utf8");
+  assert.match(publisher, /source_sha:/);
+  assert.match(publisher, /actions\/workflows\/ci\.yml\/runs/);
+  assert.match(publisher, /--source-ref/);
+  assert.doesNotMatch(publisher, /firefox-listing:|sync-amo-listing\.mjs --version/);
 });
 
 test("keeps package and extension versions aligned", () => {
@@ -125,7 +163,7 @@ test("publishes only successful CI pushes to main from this repository", () => {
 });
 
 test("serializes automatic and manual release versions without canceling pending store jobs", () => {
-  for (const file of ["release-main.yml", "release.yml", "publish-stores.yml"]) {
+  for (const file of ["release-main.yml", "release.yml", "publish-stores.yml", "sync-firefox-listing.yml"]) {
     const source = fs.readFileSync(path.join(root, ".github", "workflows", file), "utf8");
     assert.match(source, /concurrency:\s*\n\s*group: (?:extension-release|store-publish)\s*\n\s*cancel-in-progress: false\s*\n\s*queue: max/);
   }

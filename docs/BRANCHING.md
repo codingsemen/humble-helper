@@ -56,7 +56,7 @@ CI runs automatically for pull requests targeting `main`, for pushes to `main`, 
 
 Releases are made from `main` with immutable tags in the form `vMAJOR.MINOR.PATCH`. As a guide:
 
-- The pipeline increments `PATCH` automatically after successful main CI when Firefox publishing is enabled.
+- The pipeline increments `PATCH` automatically after successful main CI when Firefox publishing is enabled and shipped extension content changed since the last release. Listing-only changes update AMO separately; pipeline, documentation, and test-only changes do not create extension versions.
 - Increment `MINOR` for compatible features.
 - Increment `MAJOR` for breaking behavior or data changes.
 

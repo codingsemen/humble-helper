@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import {
   copyFile,
@@ -11,12 +12,15 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { assertReleaseVersion, effectiveReleaseVersion } from "./release-version.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultReleaseDirectory = path.join(root, "release-artifacts");
 const browsers = ["chrome", "firefox"];
 const maximumArtifactBytes = 50 * 1024 * 1024;
+const runFile = promisify(execFile);
+const usage = "Usage: node scripts/release-artifacts.mjs prepare <vMAJOR.MINOR.PATCH> | verify <tag> [directory] [chrome|firefox] [--source-ref <same release tag>]";
 
 export function releaseVersionFromTag(tag) {
   const match = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(tag || "");
@@ -92,6 +96,49 @@ async function assertRepositoryVersion(version) {
       `Tag version ${version} must match the effective build version ${effectiveVersion}`
     );
   }
+  return { packageMetadata, manifest };
+}
+
+export function validateReleasedSourceMetadata(tag, packageMetadata, manifest) {
+  const version = releaseVersionFromTag(tag);
+  // Supply the released version explicitly: a newer current-main base or an
+  // ambient build override must not change validation of immutable old assets.
+  effectiveReleaseVersion(packageMetadata?.version, manifest?.version, version);
+  if (!manifest?.browser_specific_settings?.gecko?.id) {
+    throw new Error("Released source must contain a Firefox extension ID");
+  }
+  return { packageMetadata, manifest };
+}
+
+export async function assertRepositoryVersionAtRef(tag, sourceRef = tag) {
+  releaseVersionFromTag(tag);
+  if (sourceRef !== tag) throw new Error("Artifact source ref must be its exact release tag");
+  const readSource = async (filename) => {
+    const { stdout } = await runFile("git", ["show", `${sourceRef}:${filename}`], {
+      cwd: root, shell: false, windowsHide: true, timeout: 30_000,
+      maxBuffer: 1024 * 1024, encoding: "utf8"
+    });
+    return JSON.parse(stdout);
+  };
+  const [packageMetadata, manifest] = await Promise.all([
+    readSource("package.json"), readSource("manifest.json")
+  ]);
+  return validateReleasedSourceMetadata(tag, packageMetadata, manifest);
+}
+
+export function validateReleasedManifest({ tag, browser, manifest, sourceManifest }) {
+  const version = releaseVersionFromTag(tag);
+  if (!browsers.includes(browser) || !manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error("Release ZIP must contain a browser manifest object");
+  }
+  if (manifest.version !== version || manifest.manifest_version !== sourceManifest?.manifest_version) {
+    throw new Error(`Release ZIP manifest must match ${tag} and its released manifest schema`);
+  }
+  const actualGuid = manifest.browser_specific_settings?.gecko?.id;
+  const expectedGuid = sourceManifest?.browser_specific_settings?.gecko?.id;
+  if (!expectedGuid || (browser === "firefox" ? actualGuid !== expectedGuid : actualGuid !== undefined)) {
+    throw new Error("Release ZIP has an unexpected Firefox extension ID");
+  }
 }
 
 async function prepareRelease(tag) {
@@ -143,9 +190,11 @@ async function prepareRelease(tag) {
   process.stdout.write(`Prepared release artifacts for ${tag}.\n`);
 }
 
-async function verifyRelease(tag, directoryArgument, target) {
+export async function verifyRelease(tag, directoryArgument, target, sourceRef) {
   const version = releaseVersionFromTag(tag);
-  await assertRepositoryVersion(version);
+  const source = sourceRef
+    ? await assertRepositoryVersionAtRef(tag, sourceRef)
+    : await assertRepositoryVersion(version);
   if (target && !browsers.includes(target)) {
     throw new Error("Verification target must be chrome or firefox");
   }
@@ -171,27 +220,60 @@ async function verifyRelease(tag, directoryArgument, target) {
     if (actual !== checksums.get(names[browser])) {
       throw new Error(`Checksum mismatch for ${names[browser]}`);
     }
+    // Dynamic import avoids a static cycle: release-changes also consumes the
+    // shared tag/checksum helpers from this module.
+    const { readReleaseZip } = await import("./release-changes.mjs");
+    const files = readReleaseZip(await readFile(file));
+    if (!files.has("manifest.json")) throw new Error("Release ZIP is missing manifest.json");
+    validateReleasedManifest({
+      tag, browser,
+      manifest: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(files.get("manifest.json"))),
+      sourceManifest: source.manifest
+    });
   }
   process.stdout.write(`Verified ${targets.join(" and ")} release artifacts for ${tag}.\n`);
 }
 
-async function main() {
-  const [command, ...rawArguments] = process.argv.slice(2);
+export function parseReleaseArtifactArguments(arguments_) {
+  const [command, ...rawArguments] = arguments_;
   if (rawArguments[0] === "--") {
     rawArguments.shift();
   }
-  const [tag, directory, target] = rawArguments;
-  if (command === "prepare" && tag) {
+  const tag = rawArguments.shift();
+  if (!tag || !["prepare", "verify"].includes(command)) throw new Error(usage);
+  releaseVersionFromTag(tag);
+  if (command === "prepare") {
+    if (rawArguments.length) throw new Error(usage);
+    return { command, tag };
+  }
+  const positionals = [];
+  let sourceRef;
+  while (rawArguments.length) {
+    const argument = rawArguments.shift();
+    if (argument === "--source-ref" && sourceRef === undefined && rawArguments[0]) {
+      sourceRef = rawArguments.shift();
+      if (sourceRef !== tag) throw new Error("Artifact source ref must be its exact release tag");
+    } else if (argument.startsWith("--") || positionals.length === 2 || sourceRef !== undefined) {
+      throw new Error(usage);
+    } else {
+      positionals.push(argument);
+    }
+  }
+  const [directory, target] = positionals;
+  if (target && !browsers.includes(target)) throw new Error("Verification target must be chrome or firefox");
+  return { command, tag, directory, target, sourceRef };
+}
+
+async function main() {
+  const { command, tag, directory, target, sourceRef } = parseReleaseArtifactArguments(process.argv.slice(2));
+  if (command === "prepare") {
     await prepareRelease(tag);
     return;
   }
-  if (command === "verify" && tag) {
-    await verifyRelease(tag, directory, target);
+  if (command === "verify") {
+    await verifyRelease(tag, directory, target, sourceRef);
     return;
   }
-  throw new Error(
-    "Usage: node scripts/release-artifacts.mjs prepare <vMAJOR.MINOR.PATCH> | verify <tag> [directory] [chrome|firefox]"
-  );
 }
 
 const isMain = process.argv[1]

@@ -49,10 +49,71 @@ jobs:
             echo "Skipping superseded CI revision; the newer main revision must pass its own CI."
           fi
 
-  build:
-    name: Package the successful main revision
+  changes:
+    name: Decide whether extension or listing content changed
     needs: source
     if: needs.source.outputs.current == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      needs_release: ${{ steps.packages.outputs.needs_release }}
+      listing_changed: ${{ steps.context.outputs.listing_changed }}
+    steps:
+      - name: Check out the exact revision that passed CI
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Select the last release and successful listing synchronization
+        id: context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: node scripts/release-context.mjs
+      - name: Enable the pinned package manager
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build comparison packages without a generated version bump
+        run: pnpm run build
+      - name: Compare against verified immutable release packages
+        id: packages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BASELINE_TAG: ${{ steps.context.outputs.baseline_tag }}
+          BASELINE_SHA: ${{ steps.context.outputs.baseline_sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$BASELINE_TAG" ]]; then
+            node scripts/release-changes.mjs --bootstrap --current-artifacts artifacts
+          else
+            [[ "$BASELINE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+            VERSION="${BASELINE_TAG#v}"
+            mkdir -p .tmp/release-baseline
+            gh release download "$BASELINE_TAG" \
+              --pattern "humble-helper-$VERSION-firefox.zip" \
+              --pattern "humble-helper-$VERSION-chrome.zip" \
+              --pattern SHA256SUMS --dir .tmp/release-baseline
+            node scripts/release-changes.mjs \
+              --baseline-dir .tmp/release-baseline --tag "$BASELINE_TAG" \
+              --source-ref "$BASELINE_SHA" --current-artifacts artifacts
+          fi
+
+  build:
+    name: Package changed extension content
+    needs: changes
+    if: needs.changes.outputs.needs_release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -200,6 +261,7 @@ jobs:
     if: needs.github-release.outputs.published == 'true'
     permissions:
       contents: read
+      actions: read
       # The shared workflow defines a conditional Chrome OIDC job. Its callers
       # must allow that ceiling even though its Firefox jobs stay read-only.
       id-token: write
@@ -207,5 +269,24 @@ jobs:
     with:
       release_tag: ${{ needs.build.outputs.release_tag }}
       target: firefox
+      source_sha: ${{ github.event.workflow_run.head_sha }}
       allow_existing_firefox: ${{ needs.build.outputs.reused == 'true' || github.run_attempt > 1 }}
+    secrets: inherit
+
+  synchronize-listing:
+    name: Update the Firefox listing independently of package releases
+    needs: [changes, build, github-release, publish-firefox]
+    if: >-
+      always() && needs.changes.result == 'success' &&
+      ((needs.changes.outputs.needs_release == 'false' &&
+        needs.changes.outputs.listing_changed == 'true') ||
+       (needs.publish-firefox.result == 'success' &&
+        needs.github-release.outputs.published == 'true'))
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/sync-firefox-listing.yml
+    with:
+      source_sha: ${{ github.event.workflow_run.head_sha }}
+      version: ${{ needs.build.outputs.version }}
     secrets: inherit

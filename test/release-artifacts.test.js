@@ -40,3 +40,53 @@ test("release checksums reject paths, duplicates, and missing packages", async (
   assert.throws(() => parseChecksumFile(`${hashA}  ${chrome}\n${hashB}  ${chrome}\n`, [chrome, firefox]));
   assert.throws(() => parseChecksumFile(`${hashA}  ${chrome}\n`, [chrome, firefox]));
 });
+
+test("immutable release validation uses the tagged source base rather than current main or ambient overrides", async () => {
+  const { validateReleasedSourceMetadata } = await import(moduleUrl);
+  const sourceManifest = {
+    version: "0.2.0", manifest_version: 3,
+    browser_specific_settings: { gecko: { id: "humble-steam-filter@example.com" } }
+  };
+  assert.equal(validateReleasedSourceMetadata("v0.2.1", { version: "0.2.0" }, sourceManifest).manifest, sourceManifest);
+  assert.throws(() => validateReleasedSourceMetadata("v0.2.1", { version: "0.3.0" }, { ...sourceManifest, version: "0.3.0" }), /source major\/minor/);
+  assert.throws(() => validateReleasedSourceMetadata("v0.2.1", { version: "0.2.0" }, { ...sourceManifest, version: "0.2.1" }), /must match/);
+  assert.throws(() => validateReleasedSourceMetadata("v0.2.1", { version: "0.2.0" }, { ...sourceManifest, browser_specific_settings: {} }), /Firefox extension ID/);
+});
+
+test("released ZIP manifests must match the immutable version, browser schema, and extension identity", async () => {
+  const { validateReleasedManifest } = await import(moduleUrl);
+  const sourceManifest = {
+    version: "0.2.0", manifest_version: 3,
+    browser_specific_settings: { gecko: { id: "humble-steam-filter@example.com" } }
+  };
+  const firefoxManifest = { ...sourceManifest, version: "0.2.1" };
+  const chromeManifest = { version: "0.2.1", manifest_version: 3 };
+  validateReleasedManifest({ tag: "v0.2.1", browser: "firefox", manifest: firefoxManifest, sourceManifest });
+  validateReleasedManifest({ tag: "v0.2.1", browser: "chrome", manifest: chromeManifest, sourceManifest });
+  for (const manifest of [
+    { ...firefoxManifest, version: "0.2.0" },
+    { ...firefoxManifest, manifest_version: 2 },
+    { ...firefoxManifest, browser_specific_settings: { gecko: { id: "another@example.com" } } },
+    { ...firefoxManifest, browser_specific_settings: {} },
+    [], null
+  ]) assert.throws(() => validateReleasedManifest({ tag: "v0.2.1", browser: "firefox", manifest, sourceManifest }));
+  assert.throws(() => validateReleasedManifest({ tag: "v0.2.1", browser: "chrome", manifest: firefoxManifest, sourceManifest }), /extension ID/);
+});
+
+test("release verifier source-ref arguments bind old-asset validation to that exact release tag", async () => {
+  const { parseReleaseArtifactArguments, assertRepositoryVersionAtRef } = await import(moduleUrl);
+  assert.deepEqual(parseReleaseArtifactArguments(["prepare", "--", "v0.2.1"]), { command: "prepare", tag: "v0.2.1" });
+  assert.deepEqual(parseReleaseArtifactArguments(["verify", "v0.2.1", "release-artifacts", "firefox", "--source-ref", "v0.2.1"]), {
+    command: "verify", tag: "v0.2.1", directory: "release-artifacts", target: "firefox", sourceRef: "v0.2.1"
+  });
+  for (const arguments_ of [
+    ["prepare", "v0.2.1", "extra"],
+    ["verify", "v0.2.1", "--source-ref"],
+    ["verify", "v0.2.1", "--source-ref", "main"],
+    ["verify", "v0.2.1", "--source-ref", "v0.2.2"],
+    ["verify", "v0.2.1", "--source-ref", "v0.2.1", "--source-ref", "v0.2.1"],
+    ["verify", "v0.2.1", "release-artifacts", "safari"],
+    ["verify", "v0.2.1", "release-artifacts", "firefox", "unexpected"]
+  ]) assert.throws(() => parseReleaseArtifactArguments(arguments_));
+  await assert.rejects(() => assertRepositoryVersionAtRef("v0.2.1", "main"), /exact release tag/);
+});
