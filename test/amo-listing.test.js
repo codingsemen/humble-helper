@@ -55,6 +55,67 @@ test("creates a short-lived AMO JWT with the expected claims and signature", asy
   assert.equal(signature, expected);
 });
 
+test("changing AMO default locale preserves existing contact translations and unwraps outgoing URLs", async () => {
+  const listing = JSON.parse(fs.readFileSync(path.join(root, "store", "firefox", "listing.json"), "utf8"));
+  const { buildMetadataPayload } = await import(moduleUrl);
+  const addon = {
+    default_locale: "de",
+    support_email: { de: "maintainer@example.com", fr: "assistance@example.com" },
+    support_url: {
+      url: { de: "https://example.com/support" },
+      outgoing: { de: "https://outgoing.example/redirect" }
+    },
+    developer_comments: { de: "Existing reviewer notes" }
+  };
+  const original = structuredClone(addon);
+  const metadata = buildMetadataPayload(listing, addon);
+  assert.deepEqual(metadata.support_email, { ...addon.support_email, "en-US": "maintainer@example.com" });
+  assert.deepEqual(metadata.support_url, { de: "https://example.com/support", "en-US": "https://example.com/support" });
+  assert.equal(metadata.developer_comments["en-US"], "Existing reviewer notes");
+  assert.equal(metadata.name["en-US"], listing.metadata.name["en-US"]);
+  assert.deepEqual(addon, original);
+  assert.equal("support_email" in listing.metadata, false);
+});
+
+test("AMO locale migration preserves existing target values and honors explicit repository support fields", async () => {
+  const listing = JSON.parse(fs.readFileSync(path.join(root, "store", "firefox", "listing.json"), "utf8"));
+  const { buildMetadataPayload, validateListing } = await import(moduleUrl);
+  const addon = {
+    default_locale: "de",
+    support_email: { de: "de@example.com", "en-US": "english@example.com" },
+    support_url: { url: { de: "https://example.com/de", "en-US": "https://example.com/en" } }
+  };
+  const metadata = buildMetadataPayload(listing, addon);
+  assert.equal("support_email" in metadata, false);
+  assert.equal("support_url" in metadata, false);
+  const explicit = structuredClone(listing);
+  explicit.metadata.support_email = { "en-US": "configured@example.com" };
+  explicit.metadata.support_url = { "en-US": "https://example.com/configured" };
+  assert.equal(validateListing(explicit), explicit);
+  const explicitPayload = buildMetadataPayload(explicit, addon);
+  assert.deepEqual(explicitPayload.support_email, explicit.metadata.support_email);
+  assert.deepEqual(explicitPayload.support_url, explicit.metadata.support_url);
+  assert.deepEqual(buildMetadataPayload(listing, { ...addon, default_locale: "en-US" }), buildMetadataPayload(listing));
+});
+
+test("AMO locale migration skips empty optional fields and fails before writes on ambiguous existing translations", async () => {
+  const listing = JSON.parse(fs.readFileSync(path.join(root, "store", "firefox", "listing.json"), "utf8"));
+  const { buildMetadataPayload, validateListing } = await import(moduleUrl);
+  assert.deepEqual(buildMetadataPayload(listing, {
+    default_locale: "de", support_email: null, support_url: { url: {} }, developer_comments: { de: "" }
+  }), buildMetadataPayload(listing));
+  for (const addon of [
+    {},
+    { default_locale: "de", support_email: { fr: "contact@example.com" } },
+    { default_locale: "de", support_email: "contact@example.com" },
+    { default_locale: "de", support_email: { de: 12 } },
+    { default_locale: "de", support_url: { outgoing: { de: "https://outgoing.example/" } } }
+  ]) assert.throws(() => buildMetadataPayload(listing, addon));
+  const invalidListing = structuredClone(listing);
+  invalidListing.metadata.support_url = { de: "https://example.com/" };
+  assert.throws(() => validateListing(invalidListing), /default locale en-US/);
+});
+
 test("synchronizes metadata, icon, and the exact repository preview set", async () => {
   const calls = [];
   let nextPreviewId = 100;
@@ -69,7 +130,24 @@ test("synchronizes metadata, icon, and the exact repository preview set", async 
       calls.push({ url: parsedUrl, options });
       const method = options.method || "GET";
       if (method === "GET") {
-        return response(200, JSON.stringify({ previews: [{ id: 11 }, { id: 12 }] }));
+        assert.equal(parsedUrl.search, "", "fetch full translations, never ?lang=en-US");
+        return response(200, JSON.stringify({
+          default_locale: "de",
+          support_email: { de: "maintainer@example.com" },
+          support_url: { url: { de: "https://example.com/support" }, outgoing: { de: "https://outgoing.example/" } },
+          previews: [{ id: 11 }, { id: 12 }]
+        }));
+      }
+      if (method === "PATCH" && options.headers["Content-Type"] === "application/json"
+        && parsedUrl.pathname.endsWith("/addon/humble-steam-filter%40example.com/")) {
+        const metadata = JSON.parse(options.body);
+        // Model AMO's real default-locale validator; the previous payload
+        // failed here before reaching icon or preview uploads.
+        if (!metadata.support_email?.[metadata.default_locale] || !metadata.support_url?.[metadata.default_locale]) {
+          return response(400, JSON.stringify({ support_email: ["Default locale required"], support_url: ["Default locale required"] }));
+        }
+        assert.equal(metadata.support_email["en-US"], "maintainer@example.com");
+        assert.equal(metadata.support_url["en-US"], "https://example.com/support");
       }
       if (method === "DELETE") {
         return response(204);

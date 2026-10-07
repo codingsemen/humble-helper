@@ -133,6 +133,8 @@ Use automatic releases for normal merges. To deliberately publish a source-match
 
 If Firefox submission succeeds but the listing synchronization job fails, rerun the failed **Synchronize Firefox listing** job rather than submitting the same version again.
 
+Reruns use the script at the immutable release tag. If the failure requires a code fix, merge that fix for the next automatic patch release instead; rerunning the old tagged script will not pick it up. Changing the listing default locale requires values for every populated translated field. The synchronization script preserves existing dashboard-managed fields by carrying their old-default fallback into the new locale, including support email and the original support URL.
+
 A published release is intentionally not mutated on rerun. If the release job fails before publication, rerunning it safely completes the existing draft.
 
 ## Mozilla Add-ons setup
