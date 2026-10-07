@@ -1,4 +1,7 @@
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
+const { mkdtemp, readFile, rm, writeFile } = require("node:fs/promises");
+const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const test = require("node:test");
@@ -39,4 +42,74 @@ test("release checksums reject paths, duplicates, and missing packages", async (
   assert.throws(() => parseChecksumFile(`${hashA}  ../${chrome}\n`, [chrome, firefox]));
   assert.throws(() => parseChecksumFile(`${hashA}  ${chrome}\n${hashB}  ${chrome}\n`, [chrome, firefox]));
   assert.throws(() => parseChecksumFile(`${hashA}  ${chrome}\n`, [chrome, firefox]));
+});
+
+test("immutable release validation uses the tagged source base rather than current main or ambient overrides", async () => {
+  const { validateReleasedSourceMetadata } = await import(moduleUrl);
+  const sourceManifest = {
+    version: "0.2.0", manifest_version: 3,
+    browser_specific_settings: { gecko: { id: "humble-steam-filter@example.com" } }
+  };
+  assert.equal(validateReleasedSourceMetadata("v0.2.1", { version: "0.2.0" }, sourceManifest).manifest, sourceManifest);
+  assert.throws(() => validateReleasedSourceMetadata("v0.2.1", { version: "0.3.0" }, { ...sourceManifest, version: "0.3.0" }), /source major\/minor/);
+  assert.throws(() => validateReleasedSourceMetadata("v0.2.1", { version: "0.2.0" }, { ...sourceManifest, version: "0.2.1" }), /must match/);
+  assert.throws(() => validateReleasedSourceMetadata("v0.2.1", { version: "0.2.0" }, { ...sourceManifest, browser_specific_settings: {} }), /Firefox extension ID/);
+});
+
+test("extracted release manifests must match the immutable version, browser schema, and extension identity", async () => {
+  const { validateReleasedManifest } = await import(moduleUrl);
+  const sourceManifest = {
+    version: "0.2.0", manifest_version: 3,
+    browser_specific_settings: { gecko: { id: "humble-steam-filter@example.com" } }
+  };
+  const firefoxManifest = { ...sourceManifest, version: "0.2.1" };
+  const chromeManifest = { version: "0.2.1", manifest_version: 3 };
+  validateReleasedManifest({ tag: "v0.2.1", browser: "firefox", manifest: firefoxManifest, sourceManifest });
+  validateReleasedManifest({ tag: "v0.2.1", browser: "chrome", manifest: chromeManifest, sourceManifest });
+  for (const manifest of [
+    { ...firefoxManifest, version: "0.2.0" },
+    { ...firefoxManifest, manifest_version: 2 },
+    { ...firefoxManifest, browser_specific_settings: { gecko: { id: "another@example.com" } } },
+    { ...firefoxManifest, browser_specific_settings: {} },
+    [], null
+  ]) assert.throws(() => validateReleasedManifest({ tag: "v0.2.1", browser: "firefox", manifest, sourceManifest }));
+  assert.throws(() => validateReleasedManifest({ tag: "v0.2.1", browser: "chrome", manifest: firefoxManifest, sourceManifest }), /extension ID/);
+});
+
+test("release verifier source-ref arguments bind old-asset validation to that exact release tag", async () => {
+  const { parseReleaseArtifactArguments, assertRepositoryVersionAtRef } = await import(moduleUrl);
+  assert.deepEqual(parseReleaseArtifactArguments(["prepare", "--", "v0.2.1"]), { command: "prepare", tag: "v0.2.1" });
+  assert.deepEqual(parseReleaseArtifactArguments(["verify", "v0.2.1", "release-artifacts", "firefox", "--source-ref", "v0.2.1"]), {
+    command: "verify", tag: "v0.2.1", directory: "release-artifacts", target: "firefox", sourceRef: "v0.2.1"
+  });
+  for (const arguments_ of [
+    ["prepare", "v0.2.1", "extra"],
+    ["verify", "v0.2.1", "--source-ref"],
+    ["verify", "v0.2.1", "--source-ref", "main"],
+    ["verify", "v0.2.1", "--source-ref", "v0.2.2"],
+    ["verify", "v0.2.1", "--source-ref", "v0.2.1", "--source-ref", "v0.2.1"],
+    ["verify", "v0.2.1", "release-artifacts", "safari"],
+    ["verify", "v0.2.1", "release-artifacts", "firefox", "unexpected"]
+  ]) assert.throws(() => parseReleaseArtifactArguments(arguments_));
+  await assert.rejects(() => assertRepositoryVersionAtRef("v0.2.1", "main"), /exact release tag/);
+});
+
+test("release integrity verification checks hashes without a custom ZIP parser", async () => {
+  const { releaseArtifactNames, verifyRelease } = await import(moduleUrl);
+  const repositoryPackage = JSON.parse(await readFile(path.resolve(__dirname, "..", "package.json"), "utf8"));
+  const tag = `v${repositoryPackage.version}`;
+  const names = releaseArtifactNames(repositoryPackage.version);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "humble-release-checksums-"));
+  try {
+    const payload = Buffer.from("opaque package bytes; extraction is the publishing tool's responsibility");
+    const hash = createHash("sha256").update(payload).digest("hex");
+    await writeFile(path.join(directory, names.firefox), payload);
+    await writeFile(path.join(directory, "SHA256SUMS"),
+      `${hash}  ${names.chrome}\n${hash}  ${names.firefox}\n`);
+    await verifyRelease(tag, directory, "firefox");
+    await writeFile(path.join(directory, names.firefox), "tampered package");
+    await assert.rejects(() => verifyRelease(tag, directory, "firefox"), /Checksum mismatch/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

@@ -16,8 +16,9 @@
     "build": "node scripts/build-extensions.mjs",
     "release:prepare": "node scripts/release-artifacts.mjs prepare",
     "release:verify": "node scripts/release-artifacts.mjs verify",
+    "release:changes": "node scripts/release-changes.mjs",
     "publish:chrome": "node scripts/publish-chrome.mjs",
-    "sync:amo": "node scripts/sync-amo-listing.mjs"
+    "sync:amo": "node scripts/run-amo-listing-sync.mjs"
   },
   "devDependencies": {
     "web-ext": "10.7.0"
