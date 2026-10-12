@@ -237,8 +237,12 @@ test("serializes concurrent partial settings updates", async () => {
 });
 
 test("returns Steam counts without exposing the library IDs to extension pages", async () => {
+  let requestCount = 0;
   const harness = createBackgroundHarness({
-    fetch: async (url) => { throw new Error(`Unexpected request: ${url}`); },
+    fetch: async (url) => {
+      requestCount += 1;
+      throw new Error(`Unexpected request: ${url}`);
+    },
     initialStorage: {
       snapshot: freshSnapshot({ ownedAppIds: [10, 20], wishlistAppIds: [30] }),
       titleCache: {
@@ -254,6 +258,508 @@ test("returns Steam counts without exposing the library IDs to extension pages",
   assert.equal("ownedAppIds" in status.snapshot, false);
   assert.equal("wishlistAppIds" in status.snapshot, false);
   assert.equal("settings" in status, false);
+  assert.equal(requestCount, 0);
+});
+
+test("refreshes a missing Steam snapshot when popup status is requested", async () => {
+  let requestCount = 0;
+  const harness = createBackgroundHarness({
+    fetch: async (url) => {
+      requestCount += 1;
+      if (url.includes("/my/?")) {
+        return { ok: true, url, text: async () => "<html>g_steamID = '123'</html>" };
+      }
+      if (url.includes("/dynamicstore/userdata/")) {
+        return {
+          ok: true,
+          json: async () => ({ rgOwnedApps: [10, 20], rgWishlist: [30], rgFollowedApps: [] })
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }
+  });
+
+  const status = await harness.sendFromExtension({ type: "GET_STATUS" });
+  assert.equal(status.ownedCount, 2);
+  assert.equal(status.wishlistCount, 1);
+  assert.equal(status.snapshot.isLoggedIn, true);
+  assert.equal(status.snapshot.error, null);
+  assert.equal(requestCount, 2);
+});
+
+test("retries a fresh snapshot with an error when popup status is requested", async () => {
+  let requestCount = 0;
+  const harness = createBackgroundHarness({
+    initialStorage: {
+      snapshot: freshSnapshot({
+        ownedAppIds: [10],
+        lastAttemptedAt: Date.now() - 61 * 1000,
+        error: "Steam sync failed"
+      })
+    },
+    fetch: async (url) => {
+      requestCount += 1;
+      if (url.includes("/my/?")) {
+        return { ok: true, url, text: async () => "<html>g_steamID = '123'</html>" };
+      }
+      if (url.includes("/dynamicstore/userdata/")) {
+        return {
+          ok: true,
+          json: async () => ({ rgOwnedApps: [10, 20], rgWishlist: [30], rgFollowedApps: [] })
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }
+  });
+
+  const status = await harness.sendFromExtension({ type: "GET_STATUS" });
+  assert.equal(status.ownedCount, 2);
+  assert.equal(status.wishlistCount, 1);
+  assert.equal(status.snapshot.error, null);
+  assert.equal(requestCount, 2);
+});
+
+test("preserves the last good Steam counts when login detection is inconclusive", async () => {
+  const previousFetchedAt = Date.now() - 7 * 60 * 60 * 1000;
+  let requestCount = 0;
+  let loggedIn = false;
+  const harness = createBackgroundHarness({
+    initialStorage: {
+      snapshot: freshSnapshot({
+        ownedAppIds: [10, 20],
+        wishlistAppIds: [30],
+        fetchedAt: previousFetchedAt,
+        lastAttemptedAt: previousFetchedAt,
+        error: "empty_snapshot_unconfirmed",
+        emptyConfirmationAt: previousFetchedAt
+      })
+    },
+    fetch: async (url) => {
+      requestCount += 1;
+      if (url.includes("/my/?")) {
+        if (loggedIn) {
+          return { ok: true, url, text: async () => "<html>g_steamID = '123'</html>" };
+        }
+        return {
+          ok: true,
+          url: "https://store.steampowered.com/",
+          text: async () => "<html></html>"
+        };
+      }
+      if (url.includes("/dynamicstore/userdata/")) {
+        return {
+          ok: true,
+          json: async () => ({ rgOwnedApps: [], rgWishlist: [], rgFollowedApps: [] })
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }
+  });
+
+  const status = await harness.sendFromExtension({ type: "GET_STATUS" });
+  assert.equal(status.ownedCount, 2);
+  assert.equal(status.wishlistCount, 1);
+  assert.equal(status.snapshot.fetchedAt, previousFetchedAt);
+  assert.equal(status.snapshot.isLoggedIn, false);
+  assert.equal(status.snapshot.error, "not_logged_in");
+  assert.ok(status.snapshot.lastAttemptedAt > previousFetchedAt);
+  assert.equal(harness.getStored().snapshot.emptyConfirmationAt, 0);
+
+  const repeatedStatus = await harness.sendFromExtension({ type: "GET_STATUS" });
+  assert.equal(repeatedStatus.ownedCount, 2);
+  assert.equal(repeatedStatus.wishlistCount, 1);
+  await harness.sendFromContent({ type: "ANALYZE_BUNDLE", items: [] });
+  assert.equal(requestCount, 2);
+
+  loggedIn = true;
+  const freshConfirmation = await harness.sendFromExtension({ type: "REFRESH_DATA" });
+  assert.equal(freshConfirmation.ownedCount, 2);
+  assert.equal(freshConfirmation.wishlistCount, 1);
+  assert.equal(freshConfirmation.snapshot.error, "empty_snapshot_unconfirmed");
+  assert.ok(harness.getStored().snapshot.emptyConfirmationAt > previousFetchedAt);
+  assert.equal(requestCount, 4);
+});
+
+test("accepts a brand-new positively authenticated empty Steam account", async () => {
+  const currentTime = 1800000000000;
+  const harness = createBackgroundHarness({
+    now: () => currentTime,
+    fetch: async (url) => {
+      if (url.includes("/my/?")) {
+        return { ok: true, url, text: async () => "<html>g_steamID = '123'</html>" };
+      }
+      if (url.includes("/dynamicstore/userdata/")) {
+        return {
+          ok: true,
+          json: async () => ({ rgOwnedApps: [], rgWishlist: [], rgFollowedApps: [] })
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }
+  });
+
+  const status = await harness.sendFromExtension({ type: "GET_STATUS" });
+  assert.equal(status.ownedCount, 0);
+  assert.equal(status.wishlistCount, 0);
+  assert.equal(status.snapshot.fetchedAt, currentTime);
+  assert.equal(status.snapshot.isLoggedIn, true);
+  assert.equal(status.snapshot.error, null);
+  assert.equal(harness.getStored().snapshot.emptyConfirmationAt, 0);
+});
+
+test("requires a later authenticated response before replacing saved data with an empty snapshot", async () => {
+  let currentTime = 1800000000000;
+  const previousFetchedAt = currentTime - 7 * 60 * 60 * 1000;
+  let requestCount = 0;
+  const harness = createBackgroundHarness({
+    now: () => currentTime,
+    initialStorage: {
+      snapshot: freshSnapshot({
+        ownedAppIds: [10, 20],
+        wishlistAppIds: [30],
+        fetchedAt: previousFetchedAt,
+        lastAttemptedAt: previousFetchedAt
+      })
+    },
+    fetch: async (url) => {
+      requestCount += 1;
+      if (url.includes("/my/?")) {
+        return { ok: true, url, text: async () => "<html>g_steamID = '123'</html>" };
+      }
+      if (url.includes("/dynamicstore/userdata/")) {
+        return {
+          ok: true,
+          json: async () => ({ rgOwnedApps: [], rgWishlist: [], rgFollowedApps: [] })
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }
+  });
+
+  const provisional = await harness.sendFromExtension({ type: "GET_STATUS" });
+  assert.equal(provisional.ownedCount, 2);
+  assert.equal(provisional.wishlistCount, 1);
+  assert.equal(provisional.snapshot.fetchedAt, previousFetchedAt);
+  assert.equal(provisional.snapshot.isLoggedIn, true);
+  assert.equal(provisional.snapshot.error, "empty_snapshot_unconfirmed");
+  assert.equal(provisional.refreshCooldownMs, 60 * 1000);
+  assert.equal(harness.getStored().snapshot.emptyConfirmationAt, currentTime);
+
+  const immediateManual = await harness.sendFromExtension({ type: "REFRESH_DATA" });
+  assert.equal(immediateManual.ownedCount, 2);
+  assert.equal(immediateManual.wishlistCount, 1);
+  assert.equal(immediateManual.snapshot.error, "empty_snapshot_unconfirmed");
+  assert.equal(harness.getStored().snapshot.emptyConfirmationAt, currentTime);
+  assert.equal(requestCount, 4);
+
+  currentTime += 61 * 1000;
+  const confirmed = await harness.sendFromExtension({ type: "REFRESH_DATA" });
+  assert.equal(confirmed.ownedCount, 0);
+  assert.equal(confirmed.wishlistCount, 0);
+  assert.equal(confirmed.snapshot.fetchedAt, currentTime);
+  assert.equal(confirmed.snapshot.isLoggedIn, true);
+  assert.equal(confirmed.snapshot.error, null);
+  assert.equal(harness.getStored().snapshot.emptyConfirmationAt, 0);
+  assert.equal(requestCount, 6);
+});
+
+test("accepts an authenticated wishlist-only response after a previously owned library", async () => {
+  const previousFetchedAt = Date.now() - 7 * 60 * 60 * 1000;
+  const harness = createBackgroundHarness({
+    initialStorage: {
+      snapshot: freshSnapshot({
+        ownedAppIds: [10, 20],
+        fetchedAt: previousFetchedAt,
+        lastAttemptedAt: previousFetchedAt
+      })
+    },
+    fetch: async (url) => {
+      if (url.includes("/my/?")) {
+        return { ok: true, url, text: async () => "<html>g_steamID = '123'</html>" };
+      }
+      if (url.includes("/dynamicstore/userdata/")) {
+        return {
+          ok: true,
+          json: async () => ({ rgOwnedApps: [], rgWishlist: [40], rgFollowedApps: [] })
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }
+  });
+
+  const status = await harness.sendFromExtension({ type: "GET_STATUS" });
+  assert.equal(status.ownedCount, 0);
+  assert.equal(status.wishlistCount, 1);
+  assert.equal(status.snapshot.isLoggedIn, true);
+  assert.equal(status.snapshot.error, null);
+});
+
+test("keeps prior library data provisional when only followed apps prove the Steam session", async () => {
+  const currentTime = 1800000000000;
+  const previousFetchedAt = currentTime - 7 * 60 * 60 * 1000;
+  const harness = createBackgroundHarness({
+    now: () => currentTime,
+    initialStorage: {
+      snapshot: freshSnapshot({
+        ownedAppIds: [10, 20],
+        wishlistAppIds: [30],
+        fetchedAt: previousFetchedAt,
+        lastAttemptedAt: previousFetchedAt
+      })
+    },
+    fetch: async (url) => {
+      if (url.includes("/my/?")) {
+        return {
+          ok: true,
+          url: "https://store.steampowered.com/",
+          text: async () => "<html></html>"
+        };
+      }
+      if (url.includes("/dynamicstore/userdata/")) {
+        return {
+          ok: true,
+          json: async () => ({ rgOwnedApps: [], rgWishlist: [], rgFollowedApps: [50] })
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }
+  });
+
+  const status = await harness.sendFromExtension({ type: "GET_STATUS" });
+  assert.equal(status.ownedCount, 2);
+  assert.equal(status.wishlistCount, 1);
+  assert.equal(status.snapshot.fetchedAt, previousFetchedAt);
+  assert.equal(status.snapshot.isLoggedIn, true);
+  assert.equal(status.snapshot.error, "empty_snapshot_unconfirmed");
+  assert.equal(harness.getStored().snapshot.emptyConfirmationAt, currentTime);
+});
+
+test("uses a retained saved snapshot for bundle analysis despite a current auth error", async () => {
+  const currentTime = 1800000000000;
+  const previousFetchedAt = currentTime - 7 * 60 * 60 * 1000;
+  let requestCount = 0;
+  const harness = createBackgroundHarness({
+    now: () => currentTime,
+    initialStorage: {
+      snapshot: freshSnapshot({
+        ownedAppIds: [42],
+        fetchedAt: previousFetchedAt,
+        lastAttemptedAt: previousFetchedAt
+      }),
+      titleCache: {
+        "saved game": {
+          appId: "42",
+          steamName: "Saved Game",
+          confidence: 1,
+          fetchedAt: currentTime,
+          version: 7
+        }
+      }
+    },
+    fetch: async (url) => {
+      requestCount += 1;
+      if (url.includes("/my/?")) {
+        return {
+          ok: true,
+          url: "https://store.steampowered.com/",
+          text: async () => "<html></html>"
+        };
+      }
+      if (url.includes("/dynamicstore/userdata/")) {
+        return {
+          ok: true,
+          json: async () => ({ rgOwnedApps: [], rgWishlist: [], rgFollowedApps: [] })
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }
+  });
+
+  const result = await harness.sendFromContent({
+    type: "ANALYZE_BUNDLE",
+    items: [{ title: "Saved Game", machineName: "saved-game" }]
+  });
+
+  assert.equal(result.snapshot.fetchedAt, previousFetchedAt);
+  assert.equal(result.snapshot.isLoggedIn, false);
+  assert.equal(result.snapshot.error, "not_logged_in");
+  assert.equal(result.items[0].match.appId, "42");
+  assert.equal(result.items[0].state, "owned");
+  assert.equal(requestCount, 2);
+});
+
+test("keeps a preserved Steam snapshot through a background restart", async () => {
+  const previousFetchedAt = Date.now() - 7 * 60 * 60 * 1000;
+  let requestCount = 0;
+  const fetch = async (url) => {
+    requestCount += 1;
+    if (url.includes("/my/?")) {
+      return {
+        ok: true,
+        url: "https://store.steampowered.com/",
+        text: async () => "<html></html>"
+      };
+    }
+    if (url.includes("/dynamicstore/userdata/")) {
+      return {
+        ok: true,
+        json: async () => ({ rgOwnedApps: [], rgWishlist: [], rgFollowedApps: [] })
+      };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  const firstBackground = createBackgroundHarness({
+    initialStorage: {
+      snapshot: freshSnapshot({
+        ownedAppIds: [10, 20],
+        wishlistAppIds: [30],
+        fetchedAt: previousFetchedAt,
+        lastAttemptedAt: previousFetchedAt
+      })
+    },
+    fetch
+  });
+
+  await firstBackground.sendFromExtension({ type: "GET_STATUS" });
+  const restartedBackground = createBackgroundHarness({
+    initialStorage: firstBackground.getStored(),
+    fetch
+  });
+  const status = await restartedBackground.sendFromExtension({ type: "GET_STATUS" });
+
+  assert.equal(status.ownedCount, 2);
+  assert.equal(status.wishlistCount, 1);
+  assert.equal(status.snapshot.fetchedAt, previousFetchedAt);
+  assert.equal(status.snapshot.error, "not_logged_in");
+  assert.equal(requestCount, 2);
+});
+
+test("keeps the first authenticated empty response provisional after saved counts expire", async () => {
+  const currentTime = 1800000000000;
+  const previousFetchedAt = currentTime - 8 * 24 * 60 * 60 * 1000;
+  let searchRequests = 0;
+  const harness = createBackgroundHarness({
+    now: () => currentTime,
+    initialStorage: {
+      snapshot: freshSnapshot({
+        ownedAppIds: [10, 20],
+        wishlistAppIds: [30],
+        fetchedAt: previousFetchedAt,
+        lastAttemptedAt: previousFetchedAt
+      })
+    },
+    fetch: async (url) => {
+      if (url.includes("/my/?")) {
+        return { ok: true, url, text: async () => "<html>g_steamID = '123'</html>" };
+      }
+      if (url.includes("/dynamicstore/userdata/")) {
+        return {
+          ok: true,
+          json: async () => ({ rgOwnedApps: [], rgWishlist: [], rgFollowedApps: [] })
+        };
+      }
+      if (url.includes("/api/storesearch/")) {
+        searchRequests += 1;
+        return {
+          ok: true,
+          json: async () => ({ items: [{ type: "app", id: 10, name: "Expired Game" }] })
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }
+  });
+
+  const analysis = await harness.sendFromContent({
+    type: "ANALYZE_BUNDLE",
+    items: [{ title: "Expired Game", machineName: "expired-game" }]
+  });
+  assert.equal(analysis.snapshot.fetchedAt, 0);
+  assert.equal(analysis.snapshot.error, "empty_snapshot_unconfirmed");
+  assert.equal(analysis.items[0].match, null);
+  assert.equal(analysis.items[0].state, "unknown");
+  assert.equal(searchRequests, 0);
+
+  const status = await harness.sendFromExtension({ type: "GET_STATUS" });
+  assert.equal(status.ownedCount, 0);
+  assert.equal(status.wishlistCount, 0);
+  assert.equal(status.snapshot.fetchedAt, 0);
+  assert.equal(status.snapshot.isLoggedIn, true);
+  assert.equal(status.snapshot.error, "empty_snapshot_unconfirmed");
+  assert.equal(status.refreshCooldownMs, 60 * 1000);
+  assert.equal(harness.getStored().snapshot.emptyConfirmationAt, currentTime);
+});
+
+test("clears failure-preserved Steam data after the seven-day stale limit", async () => {
+  const currentTime = 1800000000000;
+  const previousFetchedAt = currentTime - 7 * 24 * 60 * 60 * 1000 - 1;
+  const harness = createBackgroundHarness({
+    now: () => currentTime,
+    initialStorage: {
+      snapshot: freshSnapshot({
+        ownedAppIds: [10, 20],
+        wishlistAppIds: [30],
+        fetchedAt: previousFetchedAt,
+        lastAttemptedAt: previousFetchedAt
+      })
+    },
+    fetch: async (url) => {
+      if (url.includes("/my/?")) {
+        return {
+          ok: true,
+          url: "https://store.steampowered.com/",
+          text: async () => "<html></html>"
+        };
+      }
+      if (url.includes("/dynamicstore/userdata/")) {
+        return {
+          ok: true,
+          json: async () => ({ rgOwnedApps: [], rgWishlist: [], rgFollowedApps: [] })
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }
+  });
+
+  const status = await harness.sendFromExtension({ type: "GET_STATUS" });
+  assert.equal(status.ownedCount, 0);
+  assert.equal(status.wishlistCount, 0);
+  assert.equal(status.snapshot.fetchedAt, 0);
+  assert.equal(status.snapshot.lastAttemptedAt, currentTime);
+  assert.equal(status.snapshot.isLoggedIn, false);
+  assert.equal(status.snapshot.error, "not_logged_in");
+  assert.equal(harness.getStored().snapshot.ownedAppIds.length, 0);
+  assert.equal(harness.getStored().snapshot.wishlistAppIds.length, 0);
+});
+
+test("expires previously preserved Steam data even during the retry cooldown", async () => {
+  const currentTime = 1800000000000;
+  const lastAttemptedAt = currentTime - 30 * 1000;
+  let requestCount = 0;
+  const harness = createBackgroundHarness({
+    now: () => currentTime,
+    initialStorage: {
+      snapshot: freshSnapshot({
+        ownedAppIds: [10, 20],
+        wishlistAppIds: [30],
+        fetchedAt: currentTime - 8 * 24 * 60 * 60 * 1000,
+        lastAttemptedAt,
+        isLoggedIn: false,
+        error: "not_logged_in"
+      })
+    },
+    fetch: async () => {
+      requestCount += 1;
+      throw new Error("No request expected during the retry cooldown");
+    }
+  });
+
+  const status = await harness.sendFromExtension({ type: "GET_STATUS" });
+  assert.equal(status.ownedCount, 0);
+  assert.equal(status.wishlistCount, 0);
+  assert.equal(status.snapshot.fetchedAt, 0);
+  assert.equal(status.snapshot.lastAttemptedAt, lastAttemptedAt);
+  assert.equal(status.snapshot.error, "not_logged_in");
+  assert.equal(requestCount, 0);
 });
 
 test("waits for an in-flight Steam sync before returning popup status", async () => {
@@ -428,4 +934,58 @@ test("uses the callback-compatible asynchronous response protocol", async () => 
   const response = harness.sendFromExtension({ type: "GET_SETTINGS" });
   assert.equal(harness.getLastListenerResult(), true);
   assert.equal((await response).showWishlist, true);
+});
+
+test("creates missing periodic alarms without resetting existing deadlines on later wakes", async () => {
+  const fetch = async (url) => { throw new Error(`Unexpected request: ${url}`); };
+  const first = createBackgroundHarness({ fetch });
+  await first.settleBackgroundTasks();
+
+  assert.deepEqual(
+    first.getAlarmCreates().map((alarm) => [alarm.name, alarm.periodInMinutes]).sort(),
+    [
+      ["humble-helper-bundle-sync", 60],
+      ["humble-steam-filter-sync", 360]
+    ]
+  );
+
+  const existingAlarms = first.getAlarms();
+  existingAlarms["humble-helper-bundle-sync"].scheduledTime = 111111;
+  existingAlarms["humble-steam-filter-sync"].scheduledTime = 222222;
+  const laterWake = createBackgroundHarness({ fetch, initialAlarms: existingAlarms });
+  await laterWake.settleBackgroundTasks();
+
+  assert.deepEqual(laterWake.getAlarmCreates(), []);
+  assert.equal(laterWake.getAlarms()["humble-helper-bundle-sync"].scheduledTime, 111111);
+  assert.equal(laterWake.getAlarms()["humble-steam-filter-sync"].scheduledTime, 222222);
+
+  const oneMissing = createBackgroundHarness({
+    fetch,
+    initialAlarms: {
+      "humble-steam-filter-sync": {
+        periodInMinutes: 360,
+        scheduledTime: 333333
+      }
+    }
+  });
+  await oneMissing.settleBackgroundTasks();
+  assert.deepEqual(oneMissing.getAlarmCreates(), [{
+    name: "humble-helper-bundle-sync",
+    periodInMinutes: 60
+  }]);
+  assert.equal(oneMissing.getAlarms()["humble-steam-filter-sync"].scheduledTime, 333333);
+
+  const mismatched = createBackgroundHarness({
+    fetch,
+    initialAlarms: {
+      "humble-steam-filter-sync": { periodInMinutes: 120, scheduledTime: 444444 },
+      "humble-helper-bundle-sync": { periodInMinutes: 60, scheduledTime: 555555 }
+    }
+  });
+  await mismatched.settleBackgroundTasks();
+  assert.deepEqual(mismatched.getAlarmCreates(), [{
+    name: "humble-steam-filter-sync",
+    periodInMinutes: 360
+  }]);
+  assert.equal(mismatched.getAlarms()["humble-helper-bundle-sync"].scheduledTime, 555555);
 });

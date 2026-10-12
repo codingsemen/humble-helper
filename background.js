@@ -8,6 +8,9 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
   var browserApi = globalThis.browser || globalThis.chrome;
   var shared = globalThis.HumbleSteamFilterShared;
   var SNAPSHOT_MAX_AGE = 6 * 60 * 60 * 1000;
+  var SNAPSHOT_RETRY_COOLDOWN = 60 * 1000;
+  var SNAPSHOT_MAX_STALE_AGE = 7 * 24 * 60 * 60 * 1000;
+  var EMPTY_SNAPSHOT_CONFIRMATION_AGE = 60 * 1000;
   var TITLE_CACHE_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
   var TITLE_MISS_MAX_AGE = 3 * 24 * 60 * 60 * 1000;
   var TITLE_ERROR_MAX_AGE = 5 * 60 * 1000;
@@ -41,7 +44,8 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
     fetchedAt: 0,
     lastAttemptedAt: 0,
     isLoggedIn: false,
-    error: null
+    error: null,
+    emptyConfirmationAt: 0
   };
   var emptyBundleCatalog = {
     items: [],
@@ -57,6 +61,7 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
   };
   var syncPromise = null;
   var bundleSyncPromise = null;
+  var alarmConfigurationPromise = null;
   var titleResolutionQueue = Promise.resolve();
   var refreshControlQueue = Promise.resolve();
   var settingsUpdateQueue = Promise.resolve();
@@ -77,7 +82,7 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
   }
 
   function safeSnapshotError(value) {
-    if (value === "not_logged_in") {
+    if (value === "not_logged_in" || value === "empty_snapshot_unconfirmed") {
       return value;
     }
     return safeError(value) ? "Steam sync failed" : null;
@@ -154,8 +159,41 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
       fetchedAt: safeTimestamp(snapshot.fetchedAt),
       lastAttemptedAt: safeTimestamp(snapshot.lastAttemptedAt),
       isLoggedIn: snapshot.isLoggedIn === true,
-      error: safeSnapshotError(snapshot.error)
+      error: safeSnapshotError(snapshot.error),
+      emptyConfirmationAt: safeTimestamp(snapshot.emptyConfirmationAt)
     };
+  }
+
+  function hasStoredAccountData(snapshot) {
+    return snapshot.ownedAppIds.length > 0 || snapshot.wishlistAppIds.length > 0;
+  }
+
+  function canRetainSnapshot(snapshot, now) {
+    return Boolean(snapshot.fetchedAt) && now - snapshot.fetchedAt <= SNAPSHOT_MAX_STALE_AGE;
+  }
+
+  function snapshotAfterFailure(snapshot, now, error, isLoggedIn) {
+    var next = canRetainSnapshot(snapshot, now)
+      ? Object.assign({}, snapshot)
+      : Object.assign({}, emptySnapshot, { emptyConfirmationAt: snapshot.emptyConfirmationAt });
+    next.lastAttemptedAt = now;
+    next.error = error;
+    if (typeof isLoggedIn === "boolean") {
+      next.isLoggedIn = isLoggedIn;
+    }
+    return next;
+  }
+
+  function expireFailureSnapshot(snapshot, now) {
+    if (!snapshot.error || canRetainSnapshot(snapshot, now) ||
+        (!snapshot.fetchedAt && !hasStoredAccountData(snapshot))) {
+      return snapshot;
+    }
+    return Object.assign({}, emptySnapshot, {
+      lastAttemptedAt: snapshot.lastAttemptedAt,
+      error: snapshot.error,
+      emptyConfirmationAt: snapshot.emptyConfirmationAt
+    });
   }
 
   function boundedIds(values, maximum) {
@@ -280,11 +318,15 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
     });
   }
 
-  function cooldownRemaining(lastManualAt) {
-    if (!lastManualAt) {
+  function remainingCooldown(lastAttemptAt, duration) {
+    if (!lastAttemptAt) {
       return 0;
     }
-    return Math.min(MANUAL_REFRESH_COOLDOWN, Math.max(0, MANUAL_REFRESH_COOLDOWN - (Date.now() - lastManualAt)));
+    return Math.min(duration, Math.max(0, duration - (Date.now() - lastAttemptAt)));
+  }
+
+  function cooldownRemaining(lastManualAt) {
+    return remainingCooldown(lastManualAt, MANUAL_REFRESH_COOLDOWN);
   }
 
   function claimManualRefresh(field) {
@@ -484,7 +526,22 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
     var syncTask = (async function performSync() {
       var state = await readState();
       var now = Date.now();
-      if (!force && state.snapshot.fetchedAt && now - state.snapshot.fetchedAt < SNAPSHOT_MAX_AGE) {
+      var boundedSnapshot = expireFailureSnapshot(state.snapshot, now);
+      if (boundedSnapshot !== state.snapshot) {
+        state.snapshot = boundedSnapshot;
+        await saveSnapshot(state.snapshot);
+      }
+      var hasHealthySnapshot = state.snapshot.isLoggedIn &&
+        !state.snapshot.error &&
+        state.snapshot.fetchedAt &&
+        now - state.snapshot.fetchedAt < SNAPSHOT_MAX_AGE;
+      if (!force && hasHealthySnapshot) {
+        return state.snapshot;
+      }
+      if (!force &&
+          state.snapshot.error &&
+          state.snapshot.lastAttemptedAt &&
+          now - state.snapshot.lastAttemptedAt < SNAPSHOT_RETRY_COOLDOWN) {
         return state.snapshot;
       }
 
@@ -498,37 +555,57 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
           throw new Error("Steam returned an unexpected account payload");
         }
 
+        var ownedAppIds = uniqueAppIds(userData.rgOwnedApps);
+        var wishlistAppIds = uniqueAppIds(userData.rgWishlist);
+
         // The /my/ page can redirect differently depending on the Steam
         // account state. A populated private account payload is the stronger
         // signal that the request carried the user's Steam session.
-        var hasAccountData = userData.rgOwnedApps.length > 0 ||
-          userData.rgWishlist.length > 0 ||
+        var hasLibraryData = ownedAppIds.length > 0 || wishlistAppIds.length > 0;
+        var hasSessionEvidence = isLoggedIn ||
+          hasLibraryData ||
           (Array.isArray(userData.rgFollowedApps) && userData.rgFollowedApps.length > 0);
-        if (!isLoggedIn && !hasAccountData) {
-          state.snapshot = Object.assign({}, emptySnapshot, {
-            lastAttemptedAt: now,
-            error: "not_logged_in"
-          });
+        if (!hasSessionEvidence) {
+          // Steam can briefly return its anonymous payload while the browser
+          // session is still becoming available. Keep the last successful
+          // library so that a transient authentication check cannot turn
+          // thousands of known games into a persisted zero-count snapshot.
+          state.snapshot = snapshotAfterFailure(state.snapshot, now, "not_logged_in", false);
+          state.snapshot.emptyConfirmationAt = 0;
+          await saveSnapshot(state.snapshot);
+          return state.snapshot;
+        }
+
+        var emptyConfirmationAt = state.snapshot.emptyConfirmationAt;
+        var needsEmptyConfirmation = !hasLibraryData &&
+          (hasStoredAccountData(state.snapshot) || emptyConfirmationAt);
+        if (needsEmptyConfirmation &&
+            (!emptyConfirmationAt || now - emptyConfirmationAt < EMPTY_SNAPSHOT_CONFIRMATION_AGE)) {
+          state.snapshot = snapshotAfterFailure(
+            state.snapshot,
+            now,
+            "empty_snapshot_unconfirmed",
+            true
+          );
+          state.snapshot.emptyConfirmationAt = emptyConfirmationAt || now;
           await saveSnapshot(state.snapshot);
           return state.snapshot;
         }
 
         state.snapshot = {
-          ownedAppIds: uniqueAppIds(userData.rgOwnedApps),
-          wishlistAppIds: uniqueAppIds(userData.rgWishlist),
+          ownedAppIds: ownedAppIds,
+          wishlistAppIds: wishlistAppIds,
           fetchedAt: now,
           lastAttemptedAt: now,
           isLoggedIn: true,
-          error: null
+          error: null,
+          emptyConfirmationAt: 0
         };
         await saveSnapshot(state.snapshot);
         await broadcastUpdate();
         return state.snapshot;
       } catch (error) {
-        state.snapshot = Object.assign({}, state.snapshot, {
-          lastAttemptedAt: now,
-          error: "Steam sync failed"
-        });
+        state.snapshot = snapshotAfterFailure(state.snapshot, now, "Steam sync failed");
         await saveSnapshot(state.snapshot);
         return state.snapshot;
       }
@@ -826,7 +903,7 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
   }
 
   function statusForMatch(match, snapshot, ownedAppIds, wishlistAppIds) {
-    if (!snapshot.isLoggedIn) {
+    if (!snapshot.fetchedAt) {
       return "unknown";
     }
     if (!match || !match.appId) {
@@ -882,7 +959,7 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
   async function analyzeBundle(items) {
     items = sanitizeAnalysisItems(items);
     var snapshot = await syncSteamData(false);
-    var resolved = snapshot.isLoggedIn ? await resolveTitles(items) : [];
+    var resolved = snapshot.fetchedAt ? await resolveTitles(items) : [];
     var resolutionsByKey = new Map(resolved.map(function indexResolution(resolution) {
       return [resolution.key, resolution.match];
     }));
@@ -910,16 +987,24 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
   }
 
   async function getStatus() {
-    // The install/startup listener begins the initial Steam sync in the
-    // background. If the popup opens while that request is still in flight,
-    // reading storage immediately would briefly render the empty snapshot.
-    // Wait for the active sync so the first status response reflects the
-    // account data that is being fetched.
-    if (syncPromise) {
-      await syncPromise;
-    }
+    // This also coalesces with a sync already in flight. syncSteamData returns
+    // immediately for a healthy, fresh snapshot, but missing, stale, and
+    // failed snapshots get a chance to recover after a brief retry cooldown
+    // when the popup is opened.
+    await syncSteamData(false);
+    return readStatus();
+  }
+
+  async function readStatus() {
     var state = await readState();
     var cacheEntries = Object.values(pruneTitleCache(state.titleCache));
+    var refreshCooldownMs = cooldownRemaining(state.refreshControl.steamLastManualAt);
+    if (state.snapshot.error === "empty_snapshot_unconfirmed" && state.snapshot.emptyConfirmationAt) {
+      refreshCooldownMs = Math.max(
+        refreshCooldownMs,
+        remainingCooldown(state.snapshot.emptyConfirmationAt, EMPTY_SNAPSHOT_CONFIRMATION_AGE)
+      );
+    }
     return {
       snapshot: {
         fetchedAt: state.snapshot.fetchedAt,
@@ -931,7 +1016,7 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
       wishlistCount: state.snapshot.wishlistAppIds.length,
       titleCacheCount: cacheEntries.length,
       matchedTitleCount: cacheEntries.filter(function hasAppId(entry) { return Boolean(entry.appId); }).length,
-      refreshCooldownMs: cooldownRemaining(state.refreshControl.steamLastManualAt)
+      refreshCooldownMs: refreshCooldownMs
     };
   }
 
@@ -944,7 +1029,9 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
       return getStatus();
     }
     await syncSteamData(true);
-    return getStatus();
+    // Do not immediately start a second automatic retry if the explicit
+    // refresh just failed. The next status request can retry it normally.
+    return readStatus();
   }
 
   function updateSettings(nextSettings) {
@@ -959,9 +1046,25 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
     return result;
   }
 
+  async function ensurePeriodicAlarm(name, periodInMinutes) {
+    var existing = await browserApi.alarms.get(name);
+    if (!existing || existing.periodInMinutes !== periodInMinutes) {
+      await browserApi.alarms.create(name, { periodInMinutes: periodInMinutes });
+    }
+  }
+
   function configureAlarms() {
-    browserApi.alarms.create(SYNC_ALARM, { periodInMinutes: 360 });
-    browserApi.alarms.create(BUNDLE_ALARM, { periodInMinutes: 60 });
+    if (alarmConfigurationPromise) {
+      return alarmConfigurationPromise;
+    }
+    var configuration = Promise.all([
+      ensurePeriodicAlarm(SYNC_ALARM, 360),
+      ensurePeriodicAlarm(BUNDLE_ALARM, 60)
+    ]);
+    alarmConfigurationPromise = configuration.finally(function alarmConfigurationFinished() {
+      alarmConfigurationPromise = null;
+    });
+    return alarmConfigurationPromise;
   }
 
   function runBackgroundTask(label, task) {
@@ -998,13 +1101,13 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
   }
 
   browserApi.runtime.onInstalled.addListener(function onInstalled() {
-    configureAlarms();
+    runBackgroundTask("alarm setup", configureAlarms());
     runBackgroundTask("Steam sync", syncSteamData(false));
     runBackgroundTask("bundle sync", refreshBundleCatalog(true));
   });
 
   browserApi.runtime.onStartup.addListener(function onStartup() {
-    configureAlarms();
+    runBackgroundTask("alarm setup", configureAlarms());
     runBackgroundTask("Steam sync", syncSteamData(false));
     runBackgroundTask("bundle sync", refreshBundleCatalog(true));
   });
@@ -1066,5 +1169,5 @@ if (!globalThis.HumbleSteamFilterShared && typeof importScripts === "function") 
     return true;
   });
 
-  configureAlarms();
+  runBackgroundTask("alarm setup", configureAlarms());
 })();
