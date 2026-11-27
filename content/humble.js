@@ -279,7 +279,10 @@
     var ribbon = document.createElement("div");
     ribbon.className = "hsf-owned-ribbon";
     ribbon.setAttribute("aria-label", "Owned on Steam");
-    ribbon.textContent = "Owned";
+    var icon = document.createElement("span");
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = "✓ ";
+    ribbon.append(icon, "Owned on Steam");
     return ribbon;
   }
 
