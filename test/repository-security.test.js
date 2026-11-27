@@ -163,3 +163,30 @@ test("serializes automatic and manual release versions without canceling pending
     assert.match(source, /concurrency:\s*\n\s*group: (?:extension-release|store-publish)\s*\n\s*cancel-in-progress: false\s*\n\s*queue: max/);
   }
 });
+
+test("locks patched versions of previously vulnerable build dependencies", () => {
+  const lockfile = fs.readFileSync(path.join(root, "pnpm-lock.yaml"), "utf8");
+  // Minimum patched releases from the 2026-11-19 audit. This guards against
+  // restoring old pins; the scheduled audit still checks for new advisories.
+  const minimums = {
+    "adm-zip": "0.6.1",
+    "brace-expansion": "1.1.21",
+    "fast-uri": "3.1.9",
+    "image-size": "2.0.3",
+    "js-yaml": "4.3.2",
+    "node-forge": "1.4.3",
+    "shell-quote": "1.11.0",
+    "source-map-js": "1.2.2",
+    undici: "7.30.1"
+  };
+  for (const [name, minimum] of Object.entries(minimums)) {
+    const versions = [...lockfile.matchAll(new RegExp(`^  ${name}@(\\d+\\.\\d+\\.\\d+):`, "gm"))];
+    assert.ok(versions.length, `${name} must be checked in the lockfile`);
+    const floor = minimum.split(".").map(Number);
+    for (const [, version] of versions) {
+      const parts = version.split(".").map(Number);
+      const different = parts.findIndex((part, index) => part !== floor[index]);
+      assert.ok(different === -1 || parts[different] > floor[different], `${name}@${version} is older than patched ${minimum}`);
+    }
+  }
+});

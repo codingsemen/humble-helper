@@ -15,6 +15,28 @@ test("normalizes punctuation, accents, and trademark markers", () => {
   assert.equal(shared.normalizeTitle("TMNT: Splintered Fate"), "teenage mutant ninja turtles splintered fate");
 });
 
+test("extracts the redesigned catalog across streamed Next.js script chunks", () => {
+  const html = fs.readFileSync(require.resolve("./fixtures/humble-next-catalog.html"), "utf8");
+  const bundles = shared.extractGameBundles(html);
+  assert.equal(bundles.length, 3);
+  assert.equal(bundles[0].name, "Humble 15th Anniversary - Survival of the Fittest");
+  assert.equal(bundles[0].itemCount, 12);
+  assert.equal(bundles[0].endsAt, "2026-12-08T05:00:00.000Z");
+  assert.match(bundles[0].image, /^https:\/\/hb-prd\.imgix\.net\//);
+});
+
+test("new catalog ignores other products, duplicate entries and unsafe URLs without executing scripts", () => {
+  const product = { productType: "humble-bundle", category: "games", productKey: "safe", title: "Safe", url: "/games/safe" };
+  const entries = [product, product, { ...product, url: "https://evil.example/games/unsafe" },
+    { ...product, category: "books" }, { ...product, productType: "storefront-product" }];
+  const stream = "1:" + JSON.stringify(entries) + "\n";
+  const html = `<script>self.__next_f.push(${JSON.stringify([1, stream])})</script>`;
+  assert.equal(shared.extractGameBundles(html).length, 1);
+  assert.throws(() => shared.extractGameBundles('<script>self.__next_f.push([1, alert("unsafe")])</script>'), /not found/);
+  assert.throws(() => shared.extractGameBundles('<script>self.__next_f.push([1, "1:{broken}"])</script>'), /not found/);
+  assert.equal(shared.safeBundleImageUrl("https://hb-prd.imgix.net.evil.example/tracker.png"), "");
+});
+
 test("scores exact Steam search matches above partial matches", () => {
   assert.equal(shared.titleScore("PlateUp!", "PlateUp!"), 1);
   assert.ok(shared.titleScore("PlateUp!", "PlateUp! Demo") < 1);

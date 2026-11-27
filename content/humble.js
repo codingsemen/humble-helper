@@ -7,6 +7,41 @@
   var lastSignature = "";
   var lastAnalysis = null;
   var scanTimer = null;
+  var pageUrl = location.href;
+  var settingsPageUrl = "";
+  var CARD_SELECTOR = '.tier-item-view, [data-testid="bundle-item-card"]';
+
+  function isBundlePage() {
+    return /^\/(?:games|books|software)\//.test(location.pathname);
+  }
+
+  function cardTitle(card) {
+    if (card.matches('[data-testid="bundle-item-card"]')) {
+      var image = card.querySelector('[data-testid="product-thumbnail"] img[alt]');
+      return normalizeText(image && image.getAttribute("alt"));
+    }
+    var title = card.querySelector(".item-title, .js-item-details");
+    return normalizeText(title && title.textContent);
+  }
+
+  function parseCurrentCards() {
+    var seen = new Set();
+    var items = Array.from(document.querySelectorAll('[data-testid="bundle-item-card"][data-bundle-type="games"]'))
+      .slice(0, 500).flatMap(function parseCard(card) {
+        var title = cardTitle(card);
+        var key = shared.normalizeTitle(title);
+        if (!key || seen.has(key) || /\b(coupon|discount)\b/i.test(title) ||
+            !card.querySelector('[data-testid="platform-icons"] [aria-label="Steam"]')) {
+          return [];
+        }
+        seen.add(key);
+        return [{ machineName: key.slice(0, 200), title: title,
+          type: Array.from(card.querySelectorAll("span, div")).some(function isDlcBadge(node) {
+            return node.children.length === 0 && node.textContent.trim() === "DLC";
+          }) ? "dlc" : "game" }];
+      }).slice(0, 100);
+    return items.length ? { title: document.title, items: items } : null;
+  }
 
   // Clean up UI created by a pre-0.1.6 content script when the add-on is
   // reloaded without a full page reload.
@@ -85,6 +120,12 @@
   }
 
   function parseBundle() {
+    if (!isBundlePage()) {
+      return null;
+    }
+    if (document.querySelector('[data-testid="bundle-item-card"]')) {
+      return parseCurrentCards();
+    }
     var pageData = getPageData();
     var bundleData = pageData && pageData.bundleData;
     if (!bundleData || !bundleData.tier_item_data) {
@@ -136,32 +177,36 @@
     return style.display !== "none" && style.visibility !== "hidden" && element.getBoundingClientRect().width > 0;
   }
 
-  function candidateCardForTitle(title) {
+  function candidateCardsForTitle(title) {
     var normalizedTitle = shared.normalizeTitle(title);
     if (!normalizedTitle) {
-      return null;
+      return [];
     }
-    var bundleCards = Array.from(document.querySelectorAll(".tier-item-view")).slice(0, 500)
+    var bundleCards = Array.from(document.querySelectorAll(CARD_SELECTOR)).slice(0, 500)
       .filter(isVisible)
       .filter(function cardContainsTitle(card) {
-        return Array.from(card.querySelectorAll(".item-title, .js-item-details")).slice(0, 20)
-          .some(function titleNodeContainsTitle(titleNode) {
-            return shared.normalizeTitle(titleNode.textContent).includes(normalizedTitle);
-          });
+        return shared.normalizeTitle(cardTitle(card)) === normalizedTitle &&
+          (!card.matches('[data-testid="bundle-item-card"]') ||
+            Boolean(card.querySelector('[data-testid="platform-icons"] [aria-label="Steam"]')));
       });
     if (bundleCards.length) {
-      return bundleCards[0];
+      return bundleCards;
+    }
+
+    // Do not fall back to unrelated headings when the known card layout exists.
+    if (document.querySelector(CARD_SELECTOR)) {
+      return [];
     }
 
     var headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6, [role='heading'], a")).slice(0, 2000)
       .filter(isVisible)
       .filter(function containsTitle(element) {
         var text = shared.normalizeTitle(element.textContent);
-        return text === normalizedTitle || text.includes(normalizedTitle);
+        return text === normalizedTitle;
       });
 
     if (!headings.length) {
-      return null;
+      return [];
     }
 
     var best = null;
@@ -180,7 +225,8 @@
         }
       }
     });
-    return best ? best.element : headings[0].parentElement;
+    var card = best ? best.element : headings[0].parentElement;
+    return card ? [card] : [];
   }
 
   function clearCardMark(card) {
@@ -246,6 +292,12 @@
   }
 
   function ribbonHostForCard(card) {
+    var thumbnail = card.querySelector('[data-testid="product-thumbnail"]');
+    if (thumbnail) {
+      // The new image wrapper clips overflowing content; keep ribbons inside it.
+      thumbnail.classList.add("hsf-ribbon-host");
+      return thumbnail;
+    }
     var image = card.querySelector("img");
     if (!image || !image.parentElement) {
       return card;
@@ -266,7 +318,7 @@
     if (headings.length) {
       return headings[0];
     }
-    var firstCard = document.querySelector(".tier-item-view");
+    var firstCard = document.querySelector(CARD_SELECTOR);
     return firstCard && firstCard.parentElement;
   }
 
@@ -314,11 +366,9 @@
       if (!["owned", "wishlist", "both", "unmatched"].includes(item.state)) {
         return;
       }
-      var card = candidateCardForTitle(item.title);
-      if (!card) {
-        return;
-      }
-      desiredCards.set(card, item);
+      candidateCardsForTitle(item.title).forEach(function markMatchingCard(card) {
+        desiredCards.set(card, item);
+      });
     });
 
     document.querySelectorAll("[data-hsf-card]").forEach(function removeStaleMark(card) {
@@ -363,7 +413,7 @@
       }
       if (shouldShowStatus) {
         status = createStatus(item);
-        var titleNode = card.querySelector(".item-title");
+        var titleNode = card.querySelector(".item-title, .line-clamp-2");
         if (titleNode && titleNode.parentElement) {
           titleNode.insertAdjacentElement("afterend", status);
         } else {
@@ -395,7 +445,25 @@
   }
 
   async function performScan(force) {
+    if (pageUrl !== location.href) {
+      pageUrl = location.href;
+      pageDataCache = null;
+      lastSignature = "";
+      lastAnalysis = null;
+      document.querySelectorAll(".hsf-summary").forEach(function removeSummary(node) { node.remove(); });
+      document.querySelectorAll("[data-hsf-card]").forEach(clearCardMark);
+    }
     var bundle = parseBundle();
+    if (isBundlePage() && (settingsPageUrl !== location.href || force)) {
+      var settingsUrl = location.href;
+      var initialSettings = await shared.sendRuntimeMessage(browserApi, { type: "GET_SETTINGS" });
+      if (location.href !== settingsUrl) {
+        scheduleScan(false);
+        return;
+      }
+      settingsPageUrl = settingsUrl;
+      publishDonationSettings(initialSettings);
+    }
     if (!bundle) {
       return;
     }
@@ -465,8 +533,8 @@
   });
 
   observer.observe(document, { childList: true, subtree: true });
-  shared.sendRuntimeMessage(browserApi, { type: "GET_SETTINGS" }).then(function publishInitialSettings(settings) {
-    publishDonationSettings(settings);
-  }).catch(function ignoreSettingsBridgeError() {});
+  // Inject on every Humble entry page so client-side navigation into a bundle
+  // works, but contact the background only while actually on a bundle page.
+  window.addEventListener("popstate", function onHistoryNavigation() { scheduleScan(false); });
   scheduleScan(false);
 })();

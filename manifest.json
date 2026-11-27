@@ -15,7 +15,9 @@
       "id": "humble-steam-filter@example.com",
       "strict_min_version": "140.0",
       "data_collection_permissions": {
-        "required": ["websiteContent"]
+        "required": [
+          "websiteContent"
+        ]
       }
     },
     "gecko_android": {
@@ -31,7 +33,7 @@
     "https://store.steampowered.com/*"
   ],
   "content_security_policy": {
-    "extension_pages": "default-src 'self'; script-src 'self'; connect-src https://humblebundle.com https://*.humblebundle.com https://store.steampowered.com; img-src 'self' https://hb.imgix.net https://humblebundle-a.akamaihd.net; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    "extension_pages": "default-src 'self'; script-src 'self'; connect-src https://humblebundle.com https://*.humblebundle.com https://store.steampowered.com; img-src 'self' https://hb.imgix.net https://hb-prd.imgix.net https://humblebundle-a.akamaihd.net; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
   },
   "background": {
     "scripts": [
@@ -55,9 +57,7 @@
   "content_scripts": [
     {
       "matches": [
-        "https://*.humblebundle.com/games/*",
-        "https://*.humblebundle.com/books/*",
-        "https://*.humblebundle.com/software/*"
+        "https://*.humblebundle.com/*"
       ],
       "js": [
         "shared.js",
@@ -70,9 +70,7 @@
     },
     {
       "matches": [
-        "https://*.humblebundle.com/games/*",
-        "https://*.humblebundle.com/books/*",
-        "https://*.humblebundle.com/software/*"
+        "https://*.humblebundle.com/*"
       ],
       "js": [
         "content/page-donation.js"

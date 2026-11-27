@@ -28,7 +28,7 @@
   box-shadow: 0 0 0 1px rgba(224, 174, 79, 0.12), 0 0 14px rgba(224, 174, 79, 0.24), 0 0 30px rgba(224, 174, 79, 0.1) !important;
 }
 
-[data-hsf-card="wishlist"] .item-title {
+[data-hsf-card="wishlist"] :is(.item-title, [data-testid="bundle-item-card"] .line-clamp-2) {
   color: #efc76a !important;
 }
 
@@ -50,8 +50,8 @@
   box-shadow: inset 0 0 0 1px rgba(142, 152, 166, 0.16) !important;
 }
 
-[data-hsf-card="owned"] .item-title,
-[data-hsf-card="both"] .item-title {
+[data-hsf-card="owned"] :is(.item-title, [data-testid="bundle-item-card"] .line-clamp-2),
+[data-hsf-card="both"] :is(.item-title, [data-testid="bundle-item-card"] .line-clamp-2) {
   text-decoration: line-through !important;
   text-decoration-color: rgba(255, 255, 255, 0.96) !important;
   text-decoration-thickness: 2px !important;
@@ -67,7 +67,7 @@
   filter: brightness(0.48) saturate(0.72) !important;
 }
 
-[data-hsf-card].hsf-card--dim .item-title {
+[data-hsf-card].hsf-card--dim :is(.item-title, [data-testid="bundle-item-card"] .line-clamp-2) {
   opacity: 0.82;
 }
 
@@ -172,4 +172,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Next.js thumbnails clip the old diagonal ribbon outside their image. */
+[data-testid="bundle-item-card"] .hsf-owned-ribbon {
+  top: 10px;
+  right: 10px;
+  width: auto;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 3px;
+  clip-path: none;
+  transform: none;
+  font-size: 10px;
 }
