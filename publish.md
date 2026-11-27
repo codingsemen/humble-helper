@@ -212,6 +212,12 @@ The Chrome job downloads the released ZIP, verifies its SHA-256 checksum, upload
 
 ## Troubleshooting
 
+Firefox listing sync checkpoints uploaded asset hashes and AMO preview IDs in the `firefox-listing-state` Actions artifact (90-day retention). It restores only completed publishing/listing runs on this repository's `main`, including partially failed runs. Unchanged listing content requires no writes; new screenshots are uploaded and captioned before obsolete ones are removed. Missing or expired checkpoints cause a full asset reconciliation.
+
+Mozilla shares its [submission throttles](https://github.com/mozilla/addons-server/blob/master/src/olympia/api/throttling.py) with listing and preview writes: 3/minute, 10/hour, and 24/day. The sync spaces writes by 21 seconds and honors an hourly `Retry-After` with fresh JWTs, within a total 70-minute wait budget and an 85-minute job timeout. Longer daily cooldowns still fail visibly and preserve progress; rerun **Synchronize Firefox listing** after the cooldown. Only explicit HTTP 429 rejections are retried; ambiguous upload/network failures are not automatically replayed. Logs identify the rejected method and endpoint.
+
+For a local resumable sync, use `pnpm run sync:amo -- --state-file .tmp/amo-listing/checkpoint.json`. Keep the checkpoint for later runs. Listing-only repairs do not upload another extension version.
+
 - Manual tag release rejected immediately: the tag must be `vMAJOR.MINOR.PATCH`, match both version files, and point to a commit contained in `main`. Automatic tags can have a newer patch than the source base, but must use the same major/minor.
 - Automatic main release skipped: ensure `ENABLE_FIREFOX_PUBLISHING` is a repository Actions **Variable** set to `true`, the triggering CI was a successful push to `main`, and its source is still the current main revision.
 - Package jobs skipped with `needs_release=false`: expected when no release-relevant paths changed; successful CI is still required.

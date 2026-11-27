@@ -221,3 +221,86 @@ test("synchronizes metadata, icon, and the exact repository preview set", async 
     assert.doesNotMatch(options.headers.Authorization, /test-secret/);
   }
 });
+
+function resumableAmo() {
+  const listing = JSON.parse(fs.readFileSync(path.join(root, "store/firefox/listing.json"), "utf8"));
+  const addon = {
+    ...structuredClone(listing.metadata), default_locale: listing.default_locale,
+    name: { ...listing.metadata.name, de: "Existing translation" },
+    categories: ["other"], homepage: { url: listing.metadata.homepage },
+    icons: { 128: "https://example.test/icon.png?modified=old" },
+    previews: [{ id: 11, caption: { "en-US": "Old screenshot" }, position: 0 }]
+  };
+  const calls = [];
+  let nextId = 100;
+  let rejectCaption = true;
+  const fetchImpl = async (url, options) => {
+    const pathname = new URL(url).pathname;
+    const { method, body } = options;
+    calls.push({ method, pathname, body });
+    if (method === "GET") return response(200, JSON.stringify(addon));
+    if (body instanceof FormData) {
+      if (method === "POST") {
+        const preview = { id: nextId++, position: Number(body.get("position")), caption: {} };
+        addon.previews.push(preview);
+        return response(201, JSON.stringify(preview));
+      }
+      addon.icons = { 128: "https://example.test/icon.png?modified=new" };
+      return response(200, JSON.stringify(addon));
+    }
+    const id = Number(/\/previews\/(\d+)\//.exec(pathname)?.[1]);
+    if (method === "DELETE") {
+      addon.previews = addon.previews.filter(p => p.id !== id);
+      return response(204);
+    }
+    if (id) {
+      if (rejectCaption) {
+        rejectCaption = false;
+        return { ...response(429, '{"detail":"daily cooldown"}'), headers: new Headers({ "Retry-After": "86400" }) };
+      }
+      Object.assign(addon.previews.find(p => p.id === id), JSON.parse(body));
+    } else Object.assign(addon, JSON.parse(body));
+    return response(200, JSON.stringify(addon));
+  };
+  return { addon, calls, fetchImpl };
+}
+
+test("failed caption updates resume saved uploads, preserve old screenshots, and later syncs perform no writes", async () => {
+  const { syncAmoListing } = await import(moduleUrl);
+  const amo = resumableAmo();
+  let state;
+  const options = { issuer: "issuer", secret: "secret", version: "0.2.4", fetchImpl: amo.fetchImpl,
+    saveState: async checkpoint => { state = checkpoint; } };
+  await assert.rejects(syncAmoListing(options), /PATCH .*previews\/100\/.*HTTP 429/);
+  assert.deepEqual(amo.addon.previews.map(p => p.id), [11, 100], "old screenshot survives a partial replacement");
+  assert.equal(state.previews[0].id, 100, "successful upload was checkpointed before the caption request");
+  const beforeResume = amo.calls.length;
+  await syncAmoListing({ ...options, state });
+  const resumed = amo.calls.slice(beforeResume);
+  assert.equal(resumed.filter(c => c.method === "POST").length, 3, "resume reuses the first uploaded image");
+  assert.ok(resumed.findIndex(c => c.method === "DELETE") > resumed.findLastIndex(c => c.method === "POST"));
+  assert.equal(amo.addon.previews.length, 4);
+  assert.ok(amo.addon.previews.every(p => p.caption["en-US"]), "a rejected caption is retried when resuming");
+  assert.equal(amo.calls.filter(c => c.method === "PATCH" && c.body instanceof FormData).length, 1, "unchanged icon is not uploaded again");
+  const beforeNoop = amo.calls.length;
+  // Model newer AMO responses that omit position; previews are returned in display order.
+  amo.addon.previews.forEach(p => { delete p.position; });
+  await syncAmoListing({ ...options, state });
+  assert.ok(amo.calls.slice(beforeNoop).every(c => c.method === "GET"), "unchanged metadata and images cost zero writes");
+  assert.equal(amo.addon.name.de, "Existing translation");
+
+  amo.addon.previews.shift();
+  const beforeMissing = amo.calls.length;
+  await syncAmoListing({ ...options, state });
+  assert.equal(amo.calls.slice(beforeMissing).filter(c => c.method === "POST").length, 1, "a remotely deleted image is restored");
+});
+
+test("invalid checkpoints fail before remote writes", async () => {
+  const { syncAmoListing } = await import(moduleUrl);
+  for (const state of [{}, { schema: 1, guid: "other-addon", icon: null, previews: [] },
+    { schema: 1, guid: "humble-steam-filter@example.com", icon: null, previews: [{ id: -1, hash: "x" }] }]) {
+    const amo = resumableAmo();
+    await assert.rejects(syncAmoListing({ state, issuer: "issuer", secret: "secret", version: "0.2.4", fetchImpl: amo.fetchImpl }), /checkpoint/);
+    assert.ok(amo.calls.every(c => c.method === "GET"));
+  }
+});
