@@ -305,7 +305,7 @@ function responseErrorMessage(body, status) {
   return `AMO API returned HTTP ${status}${detail ? `: ${detail}` : ""}`;
 }
 
-async function amoRequest({
+export async function amoRequest({
   apiBaseUrl,
   issuer,
   secret,
@@ -313,34 +313,52 @@ async function amoRequest({
   pathname,
   method = "GET",
   body,
-  form
+  form,
+  sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 }) {
   const headers = {
-    Accept: "application/json",
-    Authorization: `JWT ${createJwt(issuer, secret)}`
+    Accept: "application/json"
   };
   let requestBody = form;
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
     requestBody = JSON.stringify(body);
   }
-  const response = await fetchImpl(`${apiBaseUrl}${pathname}`, {
-    method,
-    headers,
-    body: requestBody,
-    signal: AbortSignal.timeout(requestTimeoutMilliseconds)
-  });
-  const responseText = await response.text();
-  if (!response.ok) {
-    throw new AmoApiError(responseErrorMessage(responseText, response.status), response.status);
-  }
-  if (!responseText) {
-    return {};
-  }
-  try {
-    return JSON.parse(responseText);
-  } catch {
-    throw new AmoApiError(`AMO API returned non-JSON HTTP ${response.status}`, response.status);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    // A rate-limit wait can outlive a JWT, so sign each attempt separately.
+    const response = await fetchImpl(`${apiBaseUrl}${pathname}`, {
+      method,
+      headers: { ...headers, Authorization: `JWT ${createJwt(issuer, secret)}` },
+      body: requestBody,
+      signal: AbortSignal.timeout(requestTimeoutMilliseconds)
+    });
+    const responseText = await response.text();
+    if (response.status === 429 && attempt < 3) {
+      const retryAfter = response.headers?.get("retry-after");
+      let delay = 60_000;
+      if (retryAfter && /^\d+$/.test(retryAfter)) {
+        delay = Number(retryAfter) * 1_000;
+      } else if (retryAfter && Number.isFinite(Date.parse(retryAfter))) {
+        delay = Math.max(0, Date.parse(retryAfter) - Date.now());
+      }
+      // Retry only an explicit rejection, never an ambiguous failed upload.
+      // Bound the wait so the protected publishing job cannot hang indefinitely.
+      if (delay <= 120_000) {
+        await sleep(delay + 1_000);
+        continue;
+      }
+    }
+    if (!response.ok) {
+      throw new AmoApiError(responseErrorMessage(responseText, response.status), response.status);
+    }
+    if (!responseText) {
+      return {};
+    }
+    try {
+      return JSON.parse(responseText);
+    } catch {
+      throw new AmoApiError(`AMO API returned non-JSON HTTP ${response.status}`, response.status);
+    }
   }
 }
 

@@ -18,6 +18,54 @@ function response(status, body = "") {
   };
 }
 
+test("AMO throttling retries the rejected upload after Retry-After with fresh authentication", async () => {
+  const { amoRequest } = await import(moduleUrl);
+  const calls = [];
+  const waits = [];
+  const form = new FormData();
+  form.append("upload", new Blob(["image"]), "preview.png");
+  const result = await amoRequest({
+    apiBaseUrl: "https://addons.mozilla.org/api/v5", pathname: "/preview/",
+    issuer: "test-issuer", secret: "test-secret", method: "POST", form,
+    sleep: async delay => waits.push(delay),
+    fetchImpl: async (url, options) => {
+      calls.push({ url, ...options });
+      return calls.length === 1
+        ? { ...response(429, '{"detail":"throttled"}'), headers: new Headers({ "Retry-After": "57" }) }
+        : response(201, '{"id":42}');
+    }
+  });
+  assert.deepEqual(result, { id: 42 });
+  assert.deepEqual(waits, [58_000]);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].body, form);
+  assert.equal(calls[1].body, form);
+  assert.equal(calls[1].method, "POST");
+  assert.notEqual(calls[0].headers.Authorization, calls[1].headers.Authorization);
+});
+
+test("AMO throttling has bounded retries and does not replay other failures", async () => {
+  const { amoRequest } = await import(moduleUrl);
+  for (const [status, retryAfter, expectedCalls, expectedWaits] of [
+    [429, null, 4, 3], [429, "9999", 1, 0], [403, "1", 1, 0], [500, "1", 1, 0]
+  ]) {
+    let calls = 0;
+    const waits = [];
+    await assert.rejects(amoRequest({
+      apiBaseUrl: "https://addons.mozilla.org/api/v5", pathname: "/addon/",
+      issuer: "test-issuer", secret: "test-secret", method: "PATCH", body: { name: "Example" },
+      sleep: async delay => waits.push(delay),
+      fetchImpl: async () => {
+        calls += 1;
+        return { ...response(status), headers: new Headers(retryAfter ? { "Retry-After": retryAfter } : {}) };
+      }
+    }), new RegExp(`HTTP ${status}`));
+    assert.equal(calls, expectedCalls);
+    assert.equal(waits.length, expectedWaits);
+    if (expectedWaits) assert.ok(waits.every(delay => delay === 61_000));
+  }
+});
+
 test("validates the repository-managed Firefox listing and keeps API fields separate from assets", async () => {
   const listing = JSON.parse(fs.readFileSync(path.join(root, "store", "firefox", "listing.json"), "utf8"));
   const { buildMetadataPayload, buildSubmissionMetadata, validateListing } = await import(moduleUrl);
