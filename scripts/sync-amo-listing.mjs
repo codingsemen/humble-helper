@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -314,6 +314,9 @@ export async function amoRequest({
   method = "GET",
   body,
   form,
+  maximumRetryWaitMilliseconds = 120_000,
+  onRetry = () => {},
+  beforeWrite = async () => {},
   sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 }) {
   const headers = {
@@ -325,6 +328,7 @@ export async function amoRequest({
     requestBody = JSON.stringify(body);
   }
   for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (method !== "GET") await beforeWrite();
     // A rate-limit wait can outlive a JWT, so sign each attempt separately.
     const response = await fetchImpl(`${apiBaseUrl}${pathname}`, {
       method,
@@ -343,13 +347,14 @@ export async function amoRequest({
       }
       // Retry only an explicit rejection, never an ambiguous failed upload.
       // Bound the wait so the protected publishing job cannot hang indefinitely.
-      if (delay <= 120_000) {
+      if (delay <= maximumRetryWaitMilliseconds) {
+        onRetry(`${method} ${pathname}: HTTP 429; retry ${attempt + 1}/3 in ${Math.ceil(delay / 1_000) + 1}s.`);
         await sleep(delay + 1_000);
         continue;
       }
     }
     if (!response.ok) {
-      throw new AmoApiError(responseErrorMessage(responseText, response.status), response.status);
+      throw new AmoApiError(`${method} ${pathname}: ${responseErrorMessage(responseText, response.status)}`, response.status);
     }
     if (!responseText) {
       return {};
@@ -420,16 +425,11 @@ function createdPreviewId(response) {
   return candidates.find((id) => Number.isInteger(id) && id > 0);
 }
 
-async function uploadPreview({ apiBaseUrl, issuer, secret, fetchImpl, listing, preview, position }) {
-  const asset = await readAsset(preview.path, `listing.previews[${position}].path`);
+async function uploadPreview({ request, listing, asset, position }) {
   const form = new FormData();
   form.set("image", new Blob([asset.bytes], { type: asset.contentType }), path.basename(asset.absolutePath));
   form.set("position", String(position));
-  const response = await amoRequest({
-    apiBaseUrl,
-    issuer,
-    secret,
-    fetchImpl,
+  const response = await request({
     pathname: `${apiPathForAddon(listing.guid)}previews/`,
     method: "POST",
     form
@@ -438,16 +438,35 @@ async function uploadPreview({ apiBaseUrl, issuer, secret, fetchImpl, listing, p
   if (!Number.isInteger(id)) {
     throw new Error(`AMO did not return an ID for preview ${position + 1}`);
   }
-  await amoRequest({
-    apiBaseUrl,
-    issuer,
-    secret,
-    fetchImpl,
-    pathname: apiPathForPreview(listing.guid, id),
-    method: "PATCH",
-    body: { caption: preview.caption, position }
-  });
   return id;
+}
+
+export function validateSyncState(state, guid) {
+  const hashPattern = /^[a-f0-9]{64}$/;
+  if (!state || state.schema !== 1 || state.guid !== guid || !Array.isArray(state.previews)
+    || state.previews.some(p => !Number.isSafeInteger(p.id) || p.id <= 0 || !hashPattern.test(p.hash))
+    || new Set(state.previews.map(p => p.id)).size !== state.previews.length
+    || (state.icon !== null && (!state.icon || !hashPattern.test(state.icon.hash)
+      || typeof state.icon.url !== "string"))) {
+    throw new Error("Invalid AMO listing checkpoint; refusing remote writes");
+  }
+  return structuredClone(state);
+}
+
+function assetHash(asset) {
+  return createHash("sha256").update(asset.bytes).digest("hex");
+}
+
+function equalValue(left, right) {
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return left.length === right.length && [...left].sort().every((v, i) => equalValue(v, [...right].sort()[i]));
+  }
+  if (left && right && typeof left === "object" && typeof right === "object") {
+    const keys = Object.keys(left).sort();
+    // PATCH preserves other translations; compare only repository-managed keys.
+    return keys.every(key => equalValue(left[key], right[key]));
+  }
+  return left === right;
 }
 
 export async function syncAmoListing({
@@ -457,7 +476,10 @@ export async function syncAmoListing({
   secret = process.env.AMO_JWT_SECRET,
   apiBaseUrl = defaultApiBaseUrl,
   fetchImpl = globalThis.fetch,
-  dryRun = false
+  dryRun = false,
+  state,
+  saveState = async () => {},
+  requestOptions = {}
 } = {}) {
   if (typeof fetchImpl !== "function") {
     throw new Error("A fetch implementation is required");
@@ -490,53 +512,66 @@ export async function syncAmoListing({
   }
 
   const addon = await getAddon({ apiBaseUrl, issuer, secret, fetchImpl, listing });
+  const checkpoint = state === undefined
+    ? { schema: 1, guid: listing.guid, icon: null, previews: [] }
+    : validateSyncState(state, listing.guid);
+  const request = options => amoRequest({ ...requestOptions, apiBaseUrl, issuer, secret, fetchImpl, ...options });
+  const persist = () => saveState(structuredClone(checkpoint));
   metadata = buildMetadataPayload(listing, addon);
-  await amoRequest({
-    apiBaseUrl,
-    issuer,
-    secret,
-    fetchImpl,
+  const changes = Object.fromEntries(Object.entries(metadata).filter(([key, value]) => {
+    // AMO now returns a flat category list; older responses use application maps.
+    if (key === "categories" && Array.isArray(addon[key])) {
+      return !equalValue([...new Set(Object.values(value).flat())], addon[key]);
+    }
+    return !equalValue(value, outgoingUrlFields.has(key) ? addon[key]?.url : addon[key]);
+  }));
+  if (Object.keys(changes).length) await request({
     pathname: apiPathForAddon(listing.guid),
     method: "PATCH",
-    body: metadata
+    body: changes
   });
 
   const icon = assets[0];
-  const iconForm = new FormData();
-  iconForm.set("icon", new Blob([icon.bytes], { type: icon.contentType }), path.basename(icon.absolutePath));
-  await amoRequest({
-    apiBaseUrl,
-    issuer,
-    secret,
-    fetchImpl,
-    pathname: apiPathForAddon(listing.guid),
-    method: "PATCH",
-    form: iconForm
-  });
+  if (checkpoint.icon?.hash !== assetHash(icon) || !checkpoint.icon.url
+    || checkpoint.icon.url !== addon.icons?.["128"]) {
+    const iconForm = new FormData();
+    iconForm.set("icon", new Blob([icon.bytes], { type: icon.contentType }), path.basename(icon.absolutePath));
+    const updated = await request({ pathname: apiPathForAddon(listing.guid), method: "PATCH", form: iconForm });
+    checkpoint.icon = { hash: assetHash(icon), url: updated.icons?.["128"] || "" };
+    await persist();
+  }
 
-  if (listing.replace_existing_previews) {
-    for (const id of previewIds(addon)) {
-      await amoRequest({
-        apiBaseUrl,
-        issuer,
-        secret,
-        fetchImpl,
-        pathname: apiPathForPreview(listing.guid, id),
-        method: "DELETE"
-      });
+  const remotePreviews = new Map((addon.previews || []).map((preview, index) =>
+    [preview.id, { ...preview, position: preview.position ?? index }]));
+  const desiredIds = new Set();
+  for (const [position, preview] of listing.previews.entries()) {
+    const hash = assetHash(assets[position + 1]);
+    let id = checkpoint.previews.find(p => p.hash === hash && remotePreviews.has(p.id) && !desiredIds.has(p.id))?.id;
+    if (id === undefined) {
+      id = await uploadPreview({ request, listing, asset: assets[position + 1], position });
+      checkpoint.previews.push({ id, hash });
+      // Save before caption updates: a rejected PATCH must not cause a duplicate POST on rerun.
+      await persist();
+    }
+    desiredIds.add(id);
+    const existing = remotePreviews.get(id);
+    if (!equalValue(preview.caption, existing?.caption) || existing?.position !== position) {
+      await request({ pathname: apiPathForPreview(listing.guid, id), method: "PATCH", body: { caption: preview.caption, position } });
     }
   }
 
-  for (const [position, preview] of listing.previews.entries()) {
-    await uploadPreview({ apiBaseUrl, issuer, secret, fetchImpl, listing, preview, position });
+  // Keep the previous screenshots visible until every replacement is uploaded and captioned.
+  for (const id of previewIds(addon).filter(id => !desiredIds.has(id))) {
+    await request({ pathname: apiPathForPreview(listing.guid, id), method: "DELETE" });
+    checkpoint.previews = checkpoint.previews.filter(p => p.id !== id);
+    await persist();
   }
+  checkpoint.previews = checkpoint.previews.filter(p => desiredIds.has(p.id));
+  await persist();
 
   if ("release_notes" in listing) {
-    await amoRequest({
-      apiBaseUrl,
-      issuer,
-      secret,
-      fetchImpl,
+    const current = await request({ pathname: apiPathForVersion(listing.guid, version) });
+    if (!equalValue(listing.release_notes, current.release_notes)) await request({
       pathname: apiPathForVersion(listing.guid, version),
       method: "PATCH",
       body: { release_notes: listing.release_notes }

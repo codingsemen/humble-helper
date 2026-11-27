@@ -73,10 +73,12 @@ jobs:
     name: Synchronize metadata without uploading an extension
     needs: source
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # AMO applies a shared 10/hour write limit to metadata and preview changes.
+    timeout-minutes: 85
     environment: browser-stores
     permissions:
       contents: read
+      actions: read
     steps:
       - name: Check out the tested main listing and sync tool
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -88,6 +90,11 @@ jobs:
         with:
           node-version: 22
           package-manager-cache: false
+      - name: Restore completed asset uploads, including partially failed syncs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: node scripts/restore-amo-listing-state.mjs "$RUNNER_TEMP/amo-listing-state"
       - name: Verify source is still current before editing the listing
         shell: bash
         env:
@@ -106,7 +113,16 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -n "$AMO_VERSION" ]]; then
-            node scripts/run-amo-listing-sync.mjs --version "$AMO_VERSION"
+            node scripts/run-amo-listing-sync.mjs --version "$AMO_VERSION" --state-file "$RUNNER_TEMP/amo-listing-state/checkpoint.json"
           else
-            node scripts/run-amo-listing-sync.mjs
+            node scripts/run-amo-listing-sync.mjs --state-file "$RUNNER_TEMP/amo-listing-state/checkpoint.json"
           fi
+      - name: Preserve asset progress even when AMO rejects a later request
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: firefox-listing-state
+          path: ${{ runner.temp }}/amo-listing-state/checkpoint.json
+          if-no-files-found: ignore
+          retention-days: 90
+          overwrite: true

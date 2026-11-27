@@ -85,3 +85,24 @@ test("listing sync CLI rejects ambiguous or noncanonical version inputs", async 
     ["--version", "0.2.1", "--version", "0.2.2"], ["--dry-run", "--dry-run"], ["--unknown"]
   ]) assert.throws(() => parseListingSyncArguments(arguments_));
 });
+
+test("listing writes are paced and hourly throttles retry the same request with bounded total waits", async () => {
+  const { listingRequestPolicy } = await import(moduleUrl);
+  const { amoRequest } = await import(pathToFileURL(path.resolve(__dirname, "../scripts/sync-amo-listing.mjs")));
+  let now = 0;
+  const waits = [], logs = [], writes = [];
+  const policy = listingRequestPolicy({ now: () => now, sleep: async ms => { waits.push(ms); now += ms; }, log: text => logs.push(text) });
+  const request = () => amoRequest({ ...policy, apiBaseUrl: "https://amo.test", pathname: "/previews/",
+    issuer: "issuer", secret: "secret", method: "POST", body: {}, fetchImpl: async () => {
+      writes.push(now);
+      return writes.length === 2
+        ? { ...response(429), headers: new Headers({ "Retry-After": "3475" }) }
+        : response(201, { id: writes.length });
+    }
+  });
+  await request(); await request(); await request();
+  assert.deepEqual(writes, [0, 21_000, 3_497_000, 3_518_000]);
+  assert.deepEqual(waits, [21_000, 3_476_000, 21_000]);
+  assert.match(logs[0], /POST \/previews\/.*3476s/);
+  await assert.rejects(policy.sleep(3_600_000), /wait budget exhausted/);
+});
