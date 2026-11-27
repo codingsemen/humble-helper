@@ -1,6 +1,7 @@
 import { cp, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { effectiveReleaseVersion } from "./release-version.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distRoot = path.join(root, "dist");
@@ -32,11 +33,11 @@ await Promise.all([...sourceEntries, "manifest.json", "package.json"].map((entry
   assertNoSymbolicLinks(path.join(root, entry))
 ));
 
-const firefoxManifest = JSON.parse(await readFile(path.join(root, "manifest.json"), "utf8"));
+const sourceManifest = JSON.parse(await readFile(path.join(root, "manifest.json"), "utf8"));
 const packageMetadata = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
-if (firefoxManifest.version !== packageMetadata.version) {
-  throw new Error("manifest.json and package.json versions must match");
-}
+const releaseVersion = effectiveReleaseVersion(packageMetadata.version, sourceManifest.version);
+const firefoxManifest = structuredClone(sourceManifest);
+firefoxManifest.version = releaseVersion;
 
 try {
   const distStats = await lstat(distRoot);

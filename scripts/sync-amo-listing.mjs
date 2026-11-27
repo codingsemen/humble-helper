@@ -11,6 +11,10 @@ const maximumAssetBytes = 4 * 1024 * 1024;
 const maximumPreviewCount = 5;
 const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const localePattern = /^[A-Za-z]{2,3}(?:-[A-Za-z]{2,4})?$/;
+const translatedMetadataFields = [
+  "name", "summary", "description", "homepage", "support_email", "support_url", "developer_comments"
+];
+const outgoingUrlFields = new Set(["homepage", "support_url"]);
 const metadataFields = new Set([
   "categories",
   "contributions_url",
@@ -25,6 +29,7 @@ const metadataFields = new Set([
   "slug",
   "summary",
   "support_email",
+  "support_url",
   "tags"
 ]);
 
@@ -93,7 +98,7 @@ function validateMetadata(metadata) {
     }
   }
 
-  for (const field of ["name", "summary", "description", "homepage", "support_email", "developer_comments"]) {
+  for (const field of translatedMetadataFields) {
     if (field in metadata) {
       validateLocaleMap(metadata[field], `metadata.${field}`);
     }
@@ -160,6 +165,11 @@ export function validateListing(listing) {
   if (listing.metadata.default_locale && listing.metadata.default_locale !== listing.default_locale) {
     throw new Error("listing.default_locale and metadata.default_locale must match");
   }
+  for (const field of translatedMetadataFields) {
+    if (field in listing.metadata && !listing.metadata[field][listing.default_locale]) {
+      throw new Error(`metadata.${field} must contain the default locale ${listing.default_locale}`);
+    }
+  }
 
   if (typeof listing.icon !== "string" || listing.icon.length === 0) {
     throw new Error("listing.icon must be a repository-relative image path");
@@ -183,12 +193,43 @@ export function validateListing(listing) {
   return listing;
 }
 
-export function buildMetadataPayload(listing) {
+export function buildMetadataPayload(listing, addon) {
   validateListing(listing);
-  return {
+  const metadata = structuredClone({
     default_locale: listing.default_locale,
     ...listing.metadata
-  };
+  });
+  if (!addon || addon.default_locale === listing.default_locale) return metadata;
+  if (typeof addon.default_locale !== "string" || !localePattern.test(addon.default_locale)) {
+    throw new Error("AMO listing must include its current default locale before changing it");
+  }
+
+  // AMO validates every populated translated field when default_locale changes,
+  // even fields omitted from a PATCH. Retain the old default's fallback rather
+  // than clearing dashboard-managed contact information or inventing values.
+  for (const field of translatedMetadataFields) {
+    if (field in metadata || addon[field] == null) continue;
+    const value = addon[field];
+    const translations = outgoingUrlFields.has(field) ? value.url : value;
+    assertPlainObject(translations, `AMO ${field} translations`);
+    const entries = Object.entries(translations);
+    if (entries.some(([locale, text]) => !localePattern.test(locale)
+      || (text !== null && typeof text !== "string"))) {
+      throw new Error(`AMO ${field} must contain full locale maps, not localized or outgoing values`);
+    }
+    if (!entries.some(([, text]) => typeof text === "string")
+      || translations[listing.default_locale]) continue;
+    const fallback = translations[addon.default_locale];
+    if (typeof fallback !== "string" || fallback.length === 0) {
+      throw new Error(`AMO ${field} has no ${addon.default_locale} fallback; add metadata.${field}.${listing.default_locale} explicitly`);
+    }
+    metadata[field] = {
+      ...Object.fromEntries(entries.filter(([, text]) => typeof text === "string" && text.length > 0)),
+      [listing.default_locale]: fallback
+    };
+    validateLocaleMap(metadata[field], `metadata.${field}`);
+  }
+  return metadata;
 }
 
 export function buildSubmissionMetadata(listing) {
@@ -331,7 +372,8 @@ export async function writeSubmissionMetadata({
 }
 
 async function getAddon({ apiBaseUrl, issuer, secret, fetchImpl, listing }) {
-  const pathname = `${apiPathForAddon(listing.guid)}?lang=${encodeURIComponent(listing.default_locale)}`;
+  // Do not request a single language: migration requires complete locale maps.
+  const pathname = apiPathForAddon(listing.guid);
   const maximumAttempts = 12;
   for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
     try {
@@ -406,7 +448,7 @@ export async function syncAmoListing({
     throw new Error("A release version is required for a live AMO listing synchronization");
   }
   const listing = await loadListing(listingPath);
-  const metadata = buildMetadataPayload(listing);
+  let metadata = buildMetadataPayload(listing);
   if (version !== undefined && !versionPattern.test(version)) {
     throw new Error("AMO release version must use MAJOR.MINOR.PATCH");
   }
@@ -430,6 +472,7 @@ export async function syncAmoListing({
   }
 
   const addon = await getAddon({ apiBaseUrl, issuer, secret, fetchImpl, listing });
+  metadata = buildMetadataPayload(listing, addon);
   await amoRequest({
     apiBaseUrl,
     issuer,

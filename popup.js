@@ -3,6 +3,8 @@
 
   var browserApi = globalThis.browser || globalThis.chrome;
   var shared = globalThis.HumbleSteamFilterShared;
+  var bundleRequestGeneration = 0;
+  var steamRequestGeneration = 0;
   var elements = {
     bundleList: document.querySelector("#bundle-list"),
     bundleStatus: document.querySelector("#bundle-status"),
@@ -164,15 +166,29 @@
   }
 
   function renderSteam(status) {
+    status = status || {};
     var snapshot = status.snapshot || {};
-    var owned = Number.isSafeInteger(status.ownedCount) ? status.ownedCount : 0;
-    var wishlist = Number.isSafeInteger(status.wishlistCount) ? status.wishlistCount : 0;
-    elements.ownedCount.textContent = owned.toLocaleString();
-    elements.wishlistCount.textContent = wishlist.toLocaleString();
-    elements.cacheCount.textContent = (status.matchedTitleCount || 0).toLocaleString();
+    var hasSavedSnapshot = Number.isFinite(snapshot.fetchedAt) && snapshot.fetchedAt > 0;
+    var owned = Number.isSafeInteger(status.ownedCount) ? status.ownedCount : null;
+    var wishlist = Number.isSafeInteger(status.wishlistCount) ? status.wishlistCount : null;
+    var matched = Number.isSafeInteger(status.matchedTitleCount) ? status.matchedTitleCount : null;
+    elements.ownedCount.textContent = hasSavedSnapshot && owned !== null ? owned.toLocaleString() : "—";
+    elements.wishlistCount.textContent = hasSavedSnapshot && wishlist !== null ? wishlist.toLocaleString() : "—";
+    elements.cacheCount.textContent = matched !== null ? matched.toLocaleString() : "—";
     elements.steamCard.classList.toggle("is-ready", Boolean(snapshot.isLoggedIn && !snapshot.error));
     if (snapshot.isLoggedIn && !snapshot.error) {
       elements.steamDetail.textContent = "Connected · updated " + shared.formatAge(snapshot.fetchedAt).toLocaleLowerCase() + ".";
+    } else if (hasSavedSnapshot && snapshot.error === "empty_snapshot_unconfirmed") {
+      elements.steamDetail.textContent = "Using saved snapshot from " + shared.formatAge(snapshot.fetchedAt).toLocaleLowerCase() +
+        ". Steam returned an empty library; refresh again after the cooldown to confirm.";
+    } else if (hasSavedSnapshot && snapshot.error === "not_logged_in") {
+      elements.steamDetail.textContent = "Using saved snapshot from " + shared.formatAge(snapshot.fetchedAt).toLocaleLowerCase() +
+        ". Sign in to Steam in this browser, then refresh.";
+    } else if (hasSavedSnapshot && snapshot.error) {
+      elements.steamDetail.textContent = "Using saved snapshot from " + shared.formatAge(snapshot.fetchedAt).toLocaleLowerCase() +
+        ". The latest Steam refresh failed.";
+    } else if (snapshot.error === "empty_snapshot_unconfirmed") {
+      elements.steamDetail.textContent = "Steam returned an empty library, but it could not be confirmed. Refresh again after the cooldown.";
     } else if (snapshot.error === "not_logged_in") {
       elements.steamDetail.textContent = "Sign in to Steam in this browser, then refresh the snapshot.";
     } else if (snapshot.error) {
@@ -184,40 +200,55 @@
     applyRefreshCooldown(elements.steamRefresh, status.refreshCooldownMs);
   }
 
-  async function load() {
-    var results = await Promise.all([
-      shared.sendRuntimeMessage(browserApi, { type: "GET_BUNDLES" }),
-      shared.sendRuntimeMessage(browserApi, { type: "GET_STATUS" })
-    ]);
-    renderBundles(results[0]);
-    renderSteam(results[1]);
+  async function requestBundles(messageType, showLoading) {
+    var requestGeneration = ++bundleRequestGeneration;
+    if (showLoading) {
+      elements.bundleRefresh.disabled = true;
+      elements.bundleStatus.textContent = "Refreshing Humble…";
+    }
+    try {
+      var catalog = await shared.sendRuntimeMessage(browserApi, { type: messageType });
+      if (requestGeneration === bundleRequestGeneration) {
+        renderBundles(catalog);
+      }
+    } catch (error) {
+      if (requestGeneration === bundleRequestGeneration) {
+        elements.bundleStatus.textContent = messageType === "GET_BUNDLES"
+          ? "The extension is still starting. Reopen this panel to try again."
+          : "Humble refresh failed: " + (error && error.message || "message unavailable") + ".";
+        applyRefreshCooldown(elements.bundleRefresh, 0);
+      }
+    }
   }
 
-  elements.bundleRefresh.addEventListener("click", async function refreshBundles() {
-    elements.bundleRefresh.disabled = true;
-    elements.bundleStatus.textContent = "Refreshing Humble…";
-    try {
-      renderBundles(await shared.sendRuntimeMessage(browserApi, { type: "REFRESH_BUNDLES" }));
-    } catch (error) {
-      elements.bundleStatus.textContent = "Humble refresh failed: " + (error && error.message || "message unavailable") + ".";
-      applyRefreshCooldown(elements.bundleRefresh, 0);
-    } finally {
-      // The response controls the cooldown state.
+  async function requestSteam(messageType, showLoading) {
+    var requestGeneration = ++steamRequestGeneration;
+    if (showLoading) {
+      elements.steamRefresh.disabled = true;
+      elements.steamDetail.textContent = "Refreshing your Steam snapshot…";
     }
+    try {
+      var status = await shared.sendRuntimeMessage(browserApi, { type: messageType });
+      if (requestGeneration === steamRequestGeneration) {
+        renderSteam(status);
+      }
+    } catch (error) {
+      if (requestGeneration === steamRequestGeneration) {
+        elements.steamCard.classList.remove("is-ready");
+        elements.steamDetail.textContent = messageType === "GET_STATUS"
+          ? "Steam snapshot unavailable."
+          : "Steam refresh failed: " + (error && error.message || "message unavailable") + ".";
+        applyRefreshCooldown(elements.steamRefresh, 0);
+      }
+    }
+  }
+
+  elements.bundleRefresh.addEventListener("click", function refreshBundles() {
+    return requestBundles("REFRESH_BUNDLES", true);
   });
 
-  elements.steamRefresh.addEventListener("click", async function refreshSteam() {
-    elements.steamRefresh.disabled = true;
-    elements.steamDetail.textContent = "Refreshing your Steam snapshot…";
-    try {
-      renderSteam(await shared.sendRuntimeMessage(browserApi, { type: "REFRESH_DATA" }));
-    } catch (error) {
-      elements.steamCard.classList.remove("is-ready");
-      elements.steamDetail.textContent = "Steam refresh failed: " + (error && error.message || "message unavailable") + ".";
-      applyRefreshCooldown(elements.steamRefresh, 0);
-    } finally {
-      // The response controls the cooldown state.
-    }
+  elements.steamRefresh.addEventListener("click", function refreshSteam() {
+    return requestSteam("REFRESH_DATA", true);
   });
 
   function openSettings() {
@@ -240,8 +271,6 @@
     });
   });
 
-  load().catch(function loadFailed() {
-    elements.bundleStatus.textContent = "The extension is still starting. Reopen this panel to try again.";
-    elements.steamDetail.textContent = "Steam snapshot unavailable.";
-  });
+  requestBundles("GET_BUNDLES", false);
+  requestSteam("GET_STATUS", false);
 })();

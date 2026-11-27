@@ -5,8 +5,13 @@ const sharedSource = fs.readFileSync(require.resolve("../shared.js"), "utf8");
 const backgroundSource = fs.readFileSync(require.resolve("../background.js"), "utf8");
 const EXTENSION_ID = "humble-helper-test";
 
-function createBackgroundHarness({ fetch, initialStorage = {} }) {
+function createBackgroundHarness({ fetch, initialStorage = {}, initialAlarms = {}, now = () => Date.now() }) {
   let stored = { ...initialStorage };
+  let alarms = Object.fromEntries(Object.entries(initialAlarms).map(([name, alarm]) => [
+    name,
+    { name, ...alarm }
+  ]));
+  const alarmCreates = [];
   const tabQueries = [];
   let messageHandler;
   let lastListenerResult;
@@ -31,7 +36,13 @@ function createBackgroundHarness({ fetch, initialStorage = {} }) {
       onMessage: { addListener(listener) { messageHandler = listener; } }
     },
     alarms: {
-      create() {},
+      async get(name) {
+        return alarms[name] ? { ...alarms[name] } : undefined;
+      },
+      create(name, details) {
+        alarmCreates.push({ name, ...details });
+        alarms[name] = { name, ...details };
+      },
       onAlarm: { addListener() {} }
     },
     tabs: {
@@ -47,8 +58,18 @@ function createBackgroundHarness({ fetch, initialStorage = {} }) {
       async setBadgeBackgroundColor() {}
     }
   };
+  class HarnessDate extends Date {
+    constructor(...args) {
+      super(...(args.length ? args : [now()]));
+    }
+
+    static now() {
+      return now();
+    }
+  }
   const sandbox = {
     AbortController,
+    Date: HarnessDate,
     URL,
     browser,
     clearTimeout,
@@ -83,6 +104,15 @@ function createBackgroundHarness({ fetch, initialStorage = {} }) {
     },
     getTabQueries() {
       return JSON.parse(JSON.stringify(tabQueries));
+    },
+    getAlarms() {
+      return JSON.parse(JSON.stringify(alarms));
+    },
+    getAlarmCreates() {
+      return JSON.parse(JSON.stringify(alarmCreates));
+    },
+    async settleBackgroundTasks() {
+      await new Promise((resolve) => setImmediate(resolve));
     },
     send(message, sender) {
       return invokeMessage(message, sender);

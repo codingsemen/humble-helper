@@ -10,4 +10,4 @@ Never include Steam or Humble cookies, browser-profile data, store credentials, 
 
 Security fixes are applied to the latest released version and the default development branch. Older extension packages should be upgraded before reporting a problem that is already fixed in the current version.
 
-The dependency lockfile is audited weekly for high-severity advisories, and Dependabot security updates should be enabled in the repository settings. These automated checks supplement responsible disclosure and code review; they do not replace either.
+The dependency lockfile is audited weekly without exceptions. CI and releases also block high/critical advisories, subject only to the documented [temporary release exception](docs/SECURITY-EXCEPTIONS.md). Dependabot security updates must be enabled separately in repository settings. These automated checks supplement responsible disclosure and code review; they do not replace either.

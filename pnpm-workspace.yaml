@@ -1,2 +1,8 @@
 packages:
   - .
+
+overrides:
+  # Keep web-ext's firefox-profile and fx-runner dependencies on patched
+  # releases until their upstream dependency constraints include these fixes.
+  adm-zip: 0.6.1
+  shell-quote: 1.12.0
