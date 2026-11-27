@@ -4,6 +4,7 @@
   var HUMBLE_ORIGIN = "https://www.humblebundle.com";
   var BUNDLE_IMAGE_HOSTS = new Set([
     "hb.imgix.net",
+    "hb-prd.imgix.net",
     "humblebundle-a.akamaihd.net"
   ]);
 
@@ -71,6 +72,74 @@
       throw new Error("Humble bundle catalog was not found");
     }
     return JSON.parse(match[1].trim());
+  }
+
+  // Next.js streams JSON strings through script tags. Decode only the literal
+  // payload; never execute page scripts in the extension's background process.
+  function nextPageRecords(html) {
+    var source = String(html || "");
+    if (source.length > 10 * 1024 * 1024) {
+      return [];
+    }
+    var chunks = [];
+    var scripts = source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi);
+    for (var script of scripts) {
+      var match = script[1].trim().match(/^self\.__next_f\.push\((\[[\s\S]*\])\);?$/);
+      if (!match) {
+        continue;
+      }
+      try {
+        var chunk = JSON.parse(match[1]);
+        if (chunk[0] === 1 && typeof chunk[1] === "string") {
+          chunks.push(chunk[1]);
+        }
+      } catch (error) { /* Ignore incomplete or non-JSON script payloads. */ }
+    }
+    return chunks.join("").split("\n").flatMap(function parseRecord(line) {
+      var record = line.match(/^[a-f0-9]+:([\[{].*)$/);
+      if (!record) {
+        return [];
+      }
+      try {
+        return [JSON.parse(record[1])];
+      } catch (error) {
+        return [];
+      }
+    });
+  }
+
+  function nextGameBundles(html) {
+    var pending = nextPageRecords(html).reverse();
+    var bundles = [];
+    var seen = new Set();
+    var visited = 0;
+    while (pending.length && visited < 100000 && bundles.length < 500) {
+      var value = pending.pop();
+      visited += 1;
+      if (!value || typeof value !== "object") {
+        continue;
+      }
+      if (value.productType === "humble-bundle" && value.category === "games") {
+        var bundle = sanitizeGameBundle({
+          id: value.productKey || value.id,
+          name: value.title,
+          url: value.url,
+          image: value.thumbnail,
+          tags: inferBundleTags({ tile_name: value.title }),
+          itemCount: value.itemsCount,
+          startsAt: value.startDate,
+          endsAt: value.endDate
+        });
+        if (bundle && !seen.has(bundle.url)) {
+          seen.add(bundle.url);
+          bundles.push(bundle);
+        }
+      } else {
+        // Reverse the stack insertion so the catalog keeps the page's order.
+        pending.push.apply(pending, Object.values(value).reverse());
+      }
+    }
+    return bundles;
   }
 
   function plainText(value, maximumLength) {
@@ -213,6 +282,13 @@
   }
 
   function extractGameBundles(html) {
+    if (!/<script\b[^>]*\bid=["']landingPage-json-data["']/i.test(String(html || ""))) {
+      var currentBundles = nextGameBundles(html);
+      if (!currentBundles.length) {
+        throw new Error("Humble bundle catalog was not found");
+      }
+      return currentBundles;
+    }
     var payload = extractLandingPageData(html);
     var sections = payload && payload.data && payload.data.games && payload.data.games.mosaic;
     var products = Array.isArray(sections)

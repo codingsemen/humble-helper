@@ -9,11 +9,16 @@ The repository contains four workflows:
 - `.github/workflows/ci.yml` tests the exact pull-request head revision, checks JavaScript syntax, treats Firefox lint warnings as errors, and builds both browser packages. It runs for pull requests to `main`, pushes to `main`, and manual requests.
 - `.github/workflows/security.yml` audits the committed dependency lockfile for high-severity vulnerabilities every Wednesday at 04:17 UTC and on manual request.
 - `.github/workflows/release.yml` accepts only `vMAJOR.MINOR.PATCH` tags on `main`, repeats the release gates, creates distinct Firefox and Chrome ZIPs plus `SHA256SUMS`, and publishes generated GitHub release notes.
-- `.github/workflows/publish-stores.yml` downloads and verifies an existing GitHub Release, then submits that version to Mozilla Add-ons, the Chrome Web Store, or both. It can be called by the release workflow or run manually.
+- `.github/workflows/publish-stores.yml` downloads and verifies an existing GitHub Release, submits that version to Mozilla Add-ons or the Chrome Web Store, and synchronizes the repository-managed Firefox listing metadata and previews. It can be called by the release workflow or run manually.
 
 Dependabot checks npm and pinned GitHub Actions versions on Monday mornings. Dependabot security updates are advisory-driven; the weekly schedule controls ordinary version updates and complements the weekly lockfile audit.
 
-Store publishing is disabled by default. The release workflow calls the store workflow only when the repository variable `ENABLE_STORE_PUBLISHING` is exactly `true`.
+Store publishing is disabled by default. Automatic release publishing is controlled independently by two repository-level Actions variables:
+
+- `ENABLE_FIREFOX_PUBLISHING=true` submits the release to Mozilla Add-ons.
+- `ENABLE_CHROME_PUBLISHING=true` submits the release to the Chrome Web Store.
+
+Leave either variable unset (or set it to `false`) to skip that store. This lets Firefox releases run while Chrome listing review or API setup is still pending. The manual **Publish browser stores** workflow remains an explicit per-store option and does not depend on these automatic-release flags.
 
 ## Required GitHub repository settings
 
@@ -56,9 +61,9 @@ Create an environment named `browser-stores`:
 
 - For a public repository, require a reviewer and allow deployments from `v*` tags. Also allow `main` only if the manual store workflow will be launched from `main`.
 - If this is a solo repository, do not enable "prevent self-review" unless another reviewer is configured.
-- Store the Mozilla secrets and Chrome variables below in the environment when possible.
+- Store the Mozilla secrets and Chrome variables below in this environment when possible. Keep the two enable flags above as repository-level **Variables**; the release caller job cannot read environment-scoped variables before it selects which store workflow to invoke.
 
-On GitHub Free, environment reviewers, environment secrets, and deployment branch/tag restrictions are available for public repositories but not private repositories. For a private Free repository, keep `ENABLE_STORE_PUBLISHING` unset and run the store workflow manually using repository-level secrets and variables; that retains a deliberate click-to-publish gate.
+On GitHub Free, environment reviewers, environment secrets, and deployment branch/tag restrictions are available for public repositories but not private repositories. For a private Free repository, keep the automatic publishing flags unset and run the store workflow manually using repository-level secrets and variables; that retains a deliberate click-to-publish gate.
 
 ## GitHub Actions cost and safeguards
 
@@ -105,7 +110,9 @@ Current limits and controls are documented by GitHub in [Actions billing](https:
    Use an annotated tag (`git tag -a`) if commit/tag signing is not configured.
 
 6. Watch **Actions -> Release**. The workflow creates a draft first, attaches `humble-helper-VERSION-firefox.zip`, `humble-helper-VERSION-chrome.zip`, and `SHA256SUMS`, then publishes the release with notes generated from merged pull requests and labels.
-7. If automatic store publishing is enabled, approve the `browser-stores` deployment. Otherwise run **Actions -> Publish browser stores**, enter the existing release tag, and choose a target.
+7. If either automatic store flag is enabled, approve the corresponding `browser-stores` deployment. For a disabled store, or to retry one store independently, run **Actions -> Publish browser stores**, enter the existing release tag, and choose `firefox` or `chrome`.
+
+If Firefox submission succeeds but the listing synchronization job fails, rerun the failed **Synchronize Firefox listing** job rather than submitting the same version again.
 
 A published release is intentionally not mutated on rerun. If the release job fails before publication, rerunning it safely completes the existing draft.
 
@@ -113,13 +120,23 @@ A published release is intentionally not mutated on rerun. If the release job fa
 
 Firefox packages must be signed by Mozilla. The workflow uses Mozilla's maintained `web-ext sign` flow with the `listed` channel, API credentials supplied only to the protected store job, and `--approval-timeout 0` so GitHub does not spend minutes waiting for review.
 
+The repository-managed AMO listing is [`store/firefox/listing.json`](store/firefox/listing.json). After the version submission succeeds, a separate protected job updates the listing metadata, uploads the icon, replaces the AMO preview set with the committed screenshots, and applies optional version release notes. The current preview files are shared with the Chrome listing under `store/chrome/`; edit the committed files and captions in a pull request before publishing.
+
 1. Create an AMO developer account and API credentials.
 2. Add these environment or repository secrets:
 
    - `AMO_JWT_ISSUER`
    - `AMO_JWT_SECRET`
 
-3. Review `store/amo-metadata.json`. It contains the minimum metadata needed for an initial listing. Complete the listing, privacy declarations, screenshots, support details, and reviewer information in AMO.
+3. Add the repository Actions variable `ENABLE_FIREFOX_PUBLISHING=true` when you want tagged releases to submit automatically. Leave it unset while you are still configuring AMO.
+
+4. Review `store/firefox/listing.json` for the repository-managed listing content. The workflow generates the small AMO submission metadata file from this source at release time. AMO-only policy or reviewer fields that are not represented in the file still require a one-time dashboard setup.
+
+5. Validate the repository-managed listing locally without contacting AMO:
+
+   ```bash
+   node scripts/sync-amo-listing.mjs --dry-run
+   ```
 
 The manifest already includes a stable Firefox extension ID, which is required for update submissions. See Mozilla's [web-ext signing reference](https://extensionworkshop.com/documentation/develop/web-ext-command-reference/) and [submission guide](https://extensionworkshop.com/documentation/publish/submitting-an-add-on/).
 
@@ -140,7 +157,7 @@ The workflow uses a Google service account and GitHub OIDC Workload Identity Fed
    - `CHROME_EXTENSION_ID` - the existing 32-character Chrome extension ID
 
 5. Follow Google's [service-account setup](https://developer.chrome.com/docs/webstore/service-accounts) and [Workload Identity Federation guidance](https://cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines). Test with the manual Chrome target first.
-6. Set `ENABLE_STORE_PUBLISHING=true` only after both stores work and the environment approval gate is configured.
+6. Set `ENABLE_CHROME_PUBLISHING=true` only after the Chrome listing has passed review, the API credentials work with the manual `chrome` target, and the environment approval gate is configured. Until then, leave it unset or `false`; Firefox can remain enabled independently.
 
 The Chrome job downloads the released ZIP, verifies its SHA-256 checksum, uploads it through API V2, waits only for asynchronous upload processing, rejects upload failures and validation warnings, and submits the item for review. Store review and eventual publication remain controlled by Google.
 
@@ -148,7 +165,7 @@ The Chrome job downloads the released ZIP, verifies its SHA-256 checksum, upload
 
 - Release rejected immediately: the tag must be `vMAJOR.MINOR.PATCH`, match both version files, and point to a commit contained in `main`.
 - Required CI check is missing: run one pull request after adding the workflow, then select `CI / Branch checks` in the ruleset.
-- Firefox submission asks for metadata: verify `store/amo-metadata.json` and the AMO listing state.
+- Firefox submission asks for metadata: verify `store/firefox/listing.json`, the generated submission metadata step, and the AMO listing state.
 - Chrome OIDC authentication fails: verify the provider resource name, service-account email, `roles/iam.workloadIdentityUser` binding, repository condition, and environment name.
 - Chrome upload fails: the version must be greater than the store version and the service account must be linked to the correct publisher.
 - Weekly audit stopped running: public-repository schedules are disabled after 60 days without activity; re-enable the workflow.

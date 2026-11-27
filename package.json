@@ -15,9 +15,11 @@
     "build": "node scripts/build-extensions.mjs",
     "release:prepare": "node scripts/release-artifacts.mjs prepare",
     "release:verify": "node scripts/release-artifacts.mjs verify",
-    "publish:chrome": "node scripts/publish-chrome.mjs"
+    "publish:chrome": "node scripts/publish-chrome.mjs",
+    "sync:amo": "node scripts/sync-amo-listing.mjs"
   },
   "devDependencies": {
-    "web-ext": "10.5.0"
+    "linkedom": "^0.18.15",
+    "web-ext": "10.8.0"
   }
 }

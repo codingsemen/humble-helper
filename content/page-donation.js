@@ -7,6 +7,144 @@
   var timer = null;
   var applying = false;
   var retryCount = 0;
+  var modernSignature = "";
+  var modernRoot = null;
+
+  function modernControls() {
+    var root = document.querySelector('[data-testid="pay-split-custom"]');
+    if (!root) {
+      return null;
+    }
+    var radio = root.querySelector('[role="radio"][value="custom"], [role="radio"]#custom');
+    var handles = ["publisher", "charity", "humble"].map(function findHandle(name) {
+      var input = root.querySelector('input[name="customPaymentSplit.' + name + '"]');
+      // Radix places the form input beside its thumb, inside the same span.
+      return input && input.parentElement.querySelector('[role="slider"]');
+    });
+    if (!radio || radio.disabled || radio.getAttribute("aria-disabled") === "true" ||
+        root.querySelectorAll('[role="slider"]').length !== 3 || handles.some(function invalidHandle(handle) {
+          return !handle || handle.hasAttribute("data-disabled") ||
+            handle.getAttribute("aria-valuemin") === null ||
+            handle.getAttribute("aria-valuenow") === null ||
+            !Number.isFinite(Number(handle.getAttribute("aria-valuenow"))) ||
+            Number(handle.getAttribute("aria-valuemax")) !== 100 ||
+            !Number.isFinite(Number(handle.getAttribute("aria-valuemin"))) ||
+            Number(handle.getAttribute("aria-valuemin")) < 0;
+        })) {
+      return null;
+    }
+    return { root: root, radio: radio, handles: handles };
+  }
+
+  function nextRender() {
+    return new Promise(function waitForReact(resolve) { setTimeout(resolve, 25); });
+  }
+
+  function donationToggleLabels() {
+    var labels = new Set(["Adjust Donation"]);
+    // The server-rendered dictionary gives the label in the active locale.
+    Array.from(document.querySelectorAll("script:not([src])")).slice(0, 200).forEach(function readDictionary(script) {
+      var text = script.textContent || "";
+      if (text.length > 5 * 1024 * 1024) {
+        return;
+      }
+      var match = text.trim().match(/^self\.__next_f\.push\((\[[\s\S]*\])\);?$/);
+      if (!match) {
+        return;
+      }
+      try {
+        var chunk = JSON.parse(match[1]);
+        if (chunk[0] !== 1 || typeof chunk[1] !== "string") {
+          return;
+        }
+        var title = chunk[1].match(/"paymentSplit":\{"title":("(?:[^"\\]|\\.)*")/);
+        if (title) {
+          labels.add(JSON.parse(title[1]));
+        }
+      } catch (error) { /* Wait for a complete dictionary or a user-opened panel. */ }
+    });
+    return labels;
+  }
+
+  async function applyModernSplit(settings) {
+    var controls = modernControls();
+    if (!controls) {
+      var custom = document.querySelector('[data-testid="pay-split-custom"] [role="radio"]#custom');
+      if (custom && !custom.disabled && custom.getAttribute("aria-disabled") !== "true" &&
+          custom.getAttribute("aria-checked") !== "true") {
+        // Selecting Custom mounts the sliders; validate them on the next pass.
+        custom.click();
+        scheduleRetry(false, 100);
+        return;
+      }
+      // The new accordion mounts its controls only after it opens.
+      var rail = document.querySelector('[data-testid="bundle-pdp-right-rail"]');
+      var labels = donationToggleLabels();
+      var toggle = rail && Array.from(rail.querySelectorAll('button[aria-expanded="false"]'))
+        .find(function donationToggle(button) { return labels.has(button.textContent.trim()); });
+      if (toggle) {
+        toggle.click();
+      }
+      scheduleRetry(false, 350);
+      return;
+    }
+    var minimums = controls.handles.map(function minimum(handle) { return Number(handle.getAttribute("aria-valuemin")); });
+    var available = 100 - minimums.reduce(function sum(total, minimum) { return total + minimum; }, 0);
+    if (available < 0) {
+      return;
+    }
+    var targets = [settings.developer, settings.charity, settings.humble].map(function target(weight, index) {
+      return minimums[index] + available * weight;
+    });
+    var signature = location.href + "|" + targets.join(":");
+    if (modernRoot === controls.root && modernSignature === signature) {
+      return;
+    }
+    applying = true;
+    controls.root.removeAttribute(APPLIED_ATTRIBUTE);
+    var url = location.href;
+    try {
+      if (controls.radio.getAttribute("aria-checked") !== "true") {
+        controls.radio.click();
+        await nextRender();
+      }
+      // Use the slider's supported keyboard events, allowing React to commit
+      // each change and rebalance siblings before sending the next event.
+      for (var step = 0; step < 120; step += 1) {
+        var currentSettings = readSettings();
+        var current = modernControls();
+        if (location.href !== url || !currentSettings || JSON.stringify(currentSettings) !== JSON.stringify(settings) ||
+            !current || current.root !== controls.root || current.radio.getAttribute("aria-checked") !== "true") {
+          return;
+        }
+        var values = current.handles.map(function value(handle) { return Number(handle.getAttribute("aria-valuenow")); });
+        if (values.every(function matched(value, index) { return Math.abs(value - targets[index]) <= 0.51; })) {
+          modernRoot = current.root;
+          modernSignature = signature;
+          current.root.setAttribute(APPLIED_ATTRIBUTE, targets.join(":"));
+          retryCount = 0;
+          return;
+        }
+        // Set Humble's floor first, then adjust the largest remaining error.
+        var index = values[2] > targets[2] + 0.51 ? 2 :
+          (Math.abs(values[0] - targets[0]) >= Math.abs(values[1] - targets[1]) ? 0 : 1);
+        var delta = targets[index] - values[index];
+        var key = delta > 0 ? "ArrowUp" : "ArrowDown";
+        if (Math.abs(delta) >= 10) {
+          key = delta > 0 ? "PageUp" : "PageDown";
+        }
+        current.handles[index].dispatchEvent(new KeyboardEvent("keydown", { key: key, code: key, bubbles: true, cancelable: true }));
+        await nextRender();
+      }
+    } finally {
+      applying = false;
+      var latestSettings = readSettings();
+      if (latestSettings && (location.href !== url || !controls.root.isConnected ||
+          JSON.stringify(latestSettings) !== JSON.stringify(settings))) {
+        scheduleRetry(true, 80);
+      }
+    }
+  }
 
   function readSettings() {
     try {
@@ -133,8 +271,16 @@
     if (applying) {
       return;
     }
+    if (typeof location !== "undefined" && !/^\/(?:games|books|software)\//.test(location.pathname)) {
+      return;
+    }
     var settings = readSettings();
     if (!settings) {
+      return;
+    }
+
+    if (document.querySelector('[data-testid="bundle-pdp-right-rail"]')) {
+      applyModernSplit(settings).catch(function ignoreChangedCheckout() {});
       return;
     }
 
@@ -226,8 +372,8 @@
     var checkoutAdded = mutations.some(function hasCheckoutNode(mutation) {
       return Array.from(mutation.addedNodes || []).some(function matchesCheckout(node) {
         return node.nodeType === Node.ELEMENT_NODE &&
-          (node.matches && node.matches(".js-split-sliders, .js-splits-view") ||
-            node.querySelector && node.querySelector(".js-split-sliders, .js-splits-view"));
+          (node.matches && node.matches('.js-split-sliders, .js-splits-view, [data-testid="pay-split-custom"], [data-testid="bundle-pdp-right-rail"]') ||
+            node.querySelector && node.querySelector('.js-split-sliders, .js-splits-view, [data-testid="pay-split-custom"], [data-testid="bundle-pdp-right-rail"]'));
       });
     });
     if (checkoutAdded) {

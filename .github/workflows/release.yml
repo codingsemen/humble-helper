@@ -93,15 +93,27 @@ jobs:
           fi
           gh release edit "$RELEASE_TAG" --draft=false --latest
 
-  publish-stores:
-    name: Publish browser stores
+  publish-firefox:
+    name: Publish Firefox store
     needs: github-release
-    if: vars.ENABLE_STORE_PUBLISHING == 'true'
+    if: vars.ENABLE_FIREFOX_PUBLISHING == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/publish-stores.yml
+    with:
+      release_tag: ${{ github.ref_name }}
+      target: firefox
+    secrets: inherit
+
+  publish-chrome:
+    name: Publish Chrome store
+    needs: github-release
+    if: vars.ENABLE_CHROME_PUBLISHING == 'true'
     permissions:
       contents: read
       id-token: write
     uses: ./.github/workflows/publish-stores.yml
     with:
       release_tag: ${{ github.ref_name }}
-      target: both
+      target: chrome
     secrets: inherit

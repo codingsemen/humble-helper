@@ -41,7 +41,11 @@ test("keeps dependency audits scheduled and release handoff storage short-lived"
   assert.match(security, /pnpm audit --audit-level high/);
   assert.match(release, /retention-days: 1/);
   assert.match(release, /--generate-notes/);
-  assert.match(release, /ENABLE_STORE_PUBLISHING == 'true'/);
+  assert.match(release, /ENABLE_FIREFOX_PUBLISHING == 'true'/);
+  assert.match(release, /ENABLE_CHROME_PUBLISHING == 'true'/);
+  assert.match(release, /target: firefox/);
+  assert.match(release, /target: chrome/);
+  assert.doesNotMatch(release, /ENABLE_STORE_PUBLISHING/);
 });
 
 test("uses gated short-lived Chrome credentials and no legacy OAuth secret", () => {
@@ -56,6 +60,18 @@ test("uses gated short-lived Chrome credentials and no legacy OAuth secret", () 
   assert.match(source, /create_credentials_file: false/);
   assert.doesNotMatch(source, /CHROME_(?:CLIENT_SECRET|REFRESH_TOKEN)/);
   assert.doesNotMatch(source, /credentials_json/);
+});
+
+test("keeps Firefox listing synchronization behind the AMO environment", () => {
+  const source = fs.readFileSync(
+    path.join(root, ".github", "workflows", "publish-stores.yml"),
+    "utf8"
+  );
+  assert.match(source, /firefox-listing:/);
+  assert.match(source, /needs: firefox/);
+  assert.match(source, /node scripts\/sync-amo-listing\.mjs --version/);
+  assert.match(source, /AMO_JWT_ISSUER: \$\{\{ secrets\.AMO_JWT_ISSUER \}\}/);
+  assert.match(source, /AMO_JWT_SECRET: \$\{\{ secrets\.AMO_JWT_SECRET \}\}/);
 });
 
 test("keeps package and extension versions aligned", () => {
@@ -78,10 +94,29 @@ test("uses a shell-free, repository-wide JavaScript syntax check", () => {
   assert.doesNotMatch(source, /shell:\s*true/);
 });
 
-test("locks the audited web-ext transitive security overrides", () => {
+test("locks patched versions of previously vulnerable build dependencies", () => {
   const lockfile = fs.readFileSync(path.join(root, "pnpm-lock.yaml"), "utf8");
-  assert.match(lockfile, /adm-zip: 0\.6\.0/);
-  assert.match(lockfile, /shell-quote: 1\.9\.0/);
-  assert.doesNotMatch(lockfile, /^\s{2}adm-zip@0\.5\./m);
-  assert.doesNotMatch(lockfile, /^\s{2}shell-quote@1\.8\.4:/m);
+  // Minimum patched releases from the 2026-11-19 audit. This guards against
+  // restoring old pins; the scheduled audit still checks for new advisories.
+  const minimums = {
+    "adm-zip": "0.6.1",
+    "brace-expansion": "1.1.21",
+    "fast-uri": "3.1.9",
+    "image-size": "2.0.3",
+    "js-yaml": "4.3.2",
+    "node-forge": "1.4.3",
+    "shell-quote": "1.11.0",
+    "source-map-js": "1.2.2",
+    undici: "7.30.1"
+  };
+  for (const [name, minimum] of Object.entries(minimums)) {
+    const versions = [...lockfile.matchAll(new RegExp(`^  ${name}@(\\d+\\.\\d+\\.\\d+):`, "gm"))];
+    assert.ok(versions.length, `${name} must be checked in the lockfile`);
+    const floor = minimum.split(".").map(Number);
+    for (const [, version] of versions) {
+      const parts = version.split(".").map(Number);
+      const different = parts.findIndex((part, index) => part !== floor[index]);
+      assert.ok(different === -1 || parts[different] > floor[different], `${name}@${version} is older than patched ${minimum}`);
+    }
+  }
 });
