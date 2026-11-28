@@ -20,7 +20,21 @@
 [data-hsf-card="owned"],
 [data-hsf-card="both"] {
   border-color: #62dfad !important;
-  box-shadow: 0 0 0 3px #62dfad !important;
+  box-shadow: none !important;
+}
+
+/* Draw inside the card, above its artwork: grid overflow clips outer shadows,
+   while an inset shadow on the card itself can be covered by child images. */
+[data-hsf-card="owned"]::after,
+[data-hsf-card="both"]::after {
+  content: "";
+  position: absolute;
+  z-index: 6;
+  inset: 0;
+  box-sizing: border-box;
+  border: 3px solid #62dfad;
+  border-radius: inherit;
+  pointer-events: none;
 }
 
 [data-hsf-card="wishlist"] {
